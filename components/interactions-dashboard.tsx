@@ -191,7 +191,7 @@ const PIE_COLORS = [
 function normalizeHeader(header: string) {
   return header
     .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .replace(/[°º]/g, "")
     .replace(/\s+/g, " ")
     .trim()
