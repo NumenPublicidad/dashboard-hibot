@@ -1,0 +1,65 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model UploadBatch {
+  id           String        @id @default(cuid())
+  fileName     String
+  rowCount     Int
+  createdAt    DateTime      @default(now())
+  interactions Interaction[]
+}
+
+model Interaction {
+  id String @id @default(cuid())
+
+  uploadBatchId String
+  uploadBatch   UploadBatch @relation(fields: [uploadBatchId], references: [id], onDelete: Cascade)
+
+  uploadedAt DateTime @default(now())
+
+  conversationId        String?
+  agent                 String?
+  contactName           String?
+  contactPhone          String?
+  email                 String?
+  tags                  String?
+  inactivityCount       Int?
+  direction             String?
+  contactType           String?
+  channelType           String?
+  channel               String?
+  client                String?
+  parentAgent           String?
+  parentConversationId  String?
+  project               String?
+  campaign              String?
+  assignmentMethod      String?
+  typification          String?
+  subTypification       String?
+  startDate             DateTime?
+  delegationDate        DateTime?
+  assignmentDate        DateTime?
+  waitTimeSeconds       Int?
+  attentionHour         String?
+  responseTimeSeconds   Int?
+  endDate               DateTime?
+  durationSeconds       Int?
+  delegationState       String?
+  notes                 String?
+  status                String?
+
+  raw Json?
+
+  @@index([uploadBatchId])
+  @@index([uploadedAt])
+  @@index([startDate])
+  @@index([typification])
+  @@index([status])
+}
