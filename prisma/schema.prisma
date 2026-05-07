@@ -63,3 +63,91 @@ model Interaction {
   @@index([typification])
   @@index([status])
 }
+model HibotWebhookEvent {
+  id        String   @id @default(cuid())
+  eventType String?
+  raw       Json
+  createdAt DateTime @default(now())
+
+  @@index([eventType])
+  @@index([createdAt])
+}
+
+model HibotConversation {
+  id String @id
+
+  active Boolean?
+  type   String?
+
+  createdAtHibot  DateTime?
+  assignedAtHibot DateTime?
+  closedAtHibot   DateTime?
+
+  typing String?
+  notes  String?
+
+  agentId    String?
+  agentName  String?
+  agentEmail String?
+
+  clientId   String?
+  clientName String?
+
+  projectId   String?
+  projectName String?
+
+  campaignId   String?
+  campaignName String?
+
+  channelId      String?
+  channelName    String?
+  channelType    String?
+  channelAccount String?
+
+  asa         Float?
+  creationAsa Float?
+
+  raw Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages HibotMessage[]
+
+  @@index([agentName])
+  @@index([channelType])
+  @@index([createdAtHibot])
+  @@index([assignedAtHibot])
+  @@index([closedAtHibot])
+}
+
+model HibotMessage {
+  id String @id
+
+  correlationId String?
+
+  conversationId String
+  conversation   HibotConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  createdAtHibot DateTime?
+
+  sender    String?
+  recipient String?
+
+  from      String?
+  content   String?
+  media     String?
+  mediaType String?
+
+  status           String?
+  errorDescription String?
+
+  raw Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId])
+  @@index([from])
+  @@index([createdAtHibot])
+  @@index([status])
+}
