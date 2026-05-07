@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 type HibotMessagePayload = {
@@ -27,7 +28,7 @@ type HibotConversationPayload = {
   notes?: string;
   type?: string;
   fields?: Record<string, unknown>;
-  contacts?: unknown[];
+  contacts?: Array<Record<string, unknown>>;
   messages?: HibotMessagePayload[];
   agent?: {
     id?: string;
@@ -86,150 +87,27 @@ function parseBoolean(value: unknown): boolean | null {
   return null;
 }
 
-function getEventType(payload: HibotWebhookPayload) {
+function toPrismaJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value ?? null)) as Prisma.InputJsonValue;
+}
+
+function getPayloadEventType(payload: HibotWebhookPayload) {
   if (payload.type) return payload.type;
   if (payload.messages?.length) return "MESSAGES";
   if (payload.acks?.length) return "ACKS";
   return "UNKNOWN";
 }
 
-async function upsertConversation(conversation: HibotConversationPayload, eventType?: string) {
-  if (!conversation.id) return;
-
-  await prisma.hibotConversation.upsert({
-    where: {
-      id: conversation.id,
+function getUnauthorizedResponse() {
+  return NextResponse.json(
+    {
+      ok: false,
+      error: "Unauthorized webhook request.",
     },
-    update: {
-      active: parseBoolean(conversation.active),
-      type: eventType ?? conversation.type ?? null,
-
-      createdAtHibot: parseDate(conversation.created),
-      assignedAtHibot: parseDate(conversation.assigned),
-      closedAtHibot: parseDate(conversation.closed),
-
-      typing: conversation.typing ?? null,
-      notes: conversation.notes ?? null,
-
-      agentId: conversation.agent?.id ?? null,
-      agentName: conversation.agent?.name ?? null,
-      agentEmail: conversation.agent?.email ?? null,
-
-      clientId: conversation.client?.id ?? null,
-      clientName: conversation.client?.name ?? null,
-
-      projectId: conversation.project?.id ?? null,
-      projectName: conversation.project?.name ?? null,
-
-      campaignId: conversation.campaign?.id ?? null,
-      campaignName: conversation.campaign?.name ?? null,
-
-      channelId: conversation.channel?.id ?? null,
-      channelName: conversation.channel?.name ?? null,
-      channelType: conversation.channel?.type ?? null,
-      channelAccount: conversation.channel?.account ?? null,
-
-      asa: conversation.asa ?? null,
-      creationAsa: conversation.creationAsa ?? null,
-
-      raw: conversation,
+    {
+      status: 401,
     },
-    create: {
-      id: conversation.id,
-
-      active: parseBoolean(conversation.active),
-      type: eventType ?? conversation.type ?? null,
-
-      createdAtHibot: parseDate(conversation.created),
-      assignedAtHibot: parseDate(conversation.assigned),
-      closedAtHibot: parseDate(conversation.closed),
-
-      typing: conversation.typing ?? null,
-      notes: conversation.notes ?? null,
-
-      agentId: conversation.agent?.id ?? null,
-      agentName: conversation.agent?.name ?? null,
-      agentEmail: conversation.agent?.email ?? null,
-
-      clientId: conversation.client?.id ?? null,
-      clientName: conversation.client?.name ?? null,
-
-      projectId: conversation.project?.id ?? null,
-      projectName: conversation.project?.name ?? null,
-
-      campaignId: conversation.campaign?.id ?? null,
-      campaignName: conversation.campaign?.name ?? null,
-
-      channelId: conversation.channel?.id ?? null,
-      channelName: conversation.channel?.name ?? null,
-      channelType: conversation.channel?.type ?? null,
-      channelAccount: conversation.channel?.account ?? null,
-
-      asa: conversation.asa ?? null,
-      creationAsa: conversation.creationAsa ?? null,
-
-      raw: conversation,
-    },
-  });
-}
-
-async function ensureConversationFromMessage(message: HibotMessagePayload) {
-  if (!message.conversationId) return;
-
-  await prisma.hibotConversation.upsert({
-    where: {
-      id: message.conversationId,
-    },
-    update: {},
-    create: {
-      id: message.conversationId,
-      raw: {
-        createdFromMessageWebhook: true,
-      },
-    },
-  });
-}
-
-async function upsertMessage(message: HibotMessagePayload, fallbackConversationId?: string) {
-  if (!message.id) return;
-
-  const conversationId = message.conversationId ?? fallbackConversationId;
-
-  if (!conversationId) return;
-
-  await prisma.hibotMessage.upsert({
-    where: {
-      id: message.id,
-    },
-    update: {
-      correlationId: message.correlationId ?? null,
-      createdAtHibot: parseDate(message.created),
-      sender: message.sender ?? null,
-      recipient: message.recipient ?? null,
-      from: message.from ?? null,
-      content: message.content ?? null,
-      media: message.media ?? null,
-      mediaType: message.mediaType ?? null,
-      status: message.status ?? null,
-      errorDescription: message.errorDescription ?? null,
-      raw: message,
-    },
-    create: {
-      id: message.id,
-      conversationId,
-      correlationId: message.correlationId ?? null,
-      createdAtHibot: parseDate(message.created),
-      sender: message.sender ?? null,
-      recipient: message.recipient ?? null,
-      from: message.from ?? null,
-      content: message.content ?? null,
-      media: message.media ?? null,
-      mediaType: message.mediaType ?? null,
-      status: message.status ?? null,
-      errorDescription: message.errorDescription ?? null,
-      raw: message,
-    },
-  });
+  );
 }
 
 export async function POST(request: Request) {
@@ -240,24 +118,15 @@ export async function POST(request: Request) {
       new URL(request.url).searchParams.get("secret");
 
     if (secret && requestSecret !== secret) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: "Unauthorized webhook request.",
-        },
-        {
-          status: 401,
-        },
-      );
+      return getUnauthorizedResponse();
     }
 
     const payload = (await request.json()) as HibotWebhookPayload;
-    const eventType = getEventType(payload);
 
     await prisma.hibotWebhookEvent.create({
       data: {
-        eventType,
-        raw: payload,
+        eventType: getPayloadEventType(payload),
+        raw: toPrismaJson(payload),
       },
     });
 
@@ -266,12 +135,82 @@ export async function POST(request: Request) {
     for (const conversation of conversations) {
       if (!conversation.id) continue;
 
-      await upsertConversation(conversation, eventType);
+      const conversationData = {
+        active: parseBoolean(conversation.active),
+        type: payload.type ?? conversation.type ?? null,
 
-      const messages = conversation.messages ?? [];
+        createdAtHibot: parseDate(conversation.created),
+        assignedAtHibot: parseDate(conversation.assigned),
+        closedAtHibot: parseDate(conversation.closed),
 
-      for (const message of messages) {
-        await upsertMessage(message, conversation.id);
+        typing: conversation.typing ?? null,
+        notes: conversation.notes ?? null,
+
+        agentId: conversation.agent?.id ?? null,
+        agentName: conversation.agent?.name ?? null,
+        agentEmail: conversation.agent?.email ?? null,
+
+        clientId: conversation.client?.id ?? null,
+        clientName: conversation.client?.name ?? null,
+
+        projectId: conversation.project?.id ?? null,
+        projectName: conversation.project?.name ?? null,
+
+        campaignId: conversation.campaign?.id ?? null,
+        campaignName: conversation.campaign?.name ?? null,
+
+        channelId: conversation.channel?.id ?? null,
+        channelName: conversation.channel?.name ?? null,
+        channelType: conversation.channel?.type ?? null,
+        channelAccount: conversation.channel?.account ?? null,
+
+        asa: conversation.asa ?? null,
+        creationAsa: conversation.creationAsa ?? null,
+
+        raw: toPrismaJson(conversation),
+      };
+
+      await prisma.hibotConversation.upsert({
+        where: {
+          id: conversation.id,
+        },
+        update: conversationData,
+        create: {
+          id: conversation.id,
+          ...conversationData,
+        },
+      });
+
+      const conversationMessages = conversation.messages ?? [];
+
+      for (const message of conversationMessages) {
+        if (!message.id) continue;
+
+        const messageData = {
+          correlationId: message.correlationId ?? null,
+          createdAtHibot: parseDate(message.created),
+          sender: message.sender ?? null,
+          recipient: message.recipient ?? null,
+          from: message.from ?? null,
+          content: message.content ?? null,
+          media: message.media ?? null,
+          mediaType: message.mediaType ?? null,
+          status: message.status ?? null,
+          errorDescription: message.errorDescription ?? null,
+          raw: toPrismaJson(message),
+        };
+
+        await prisma.hibotMessage.upsert({
+          where: {
+            id: message.id,
+          },
+          update: messageData,
+          create: {
+            id: message.id,
+            conversationId: conversation.id,
+            ...messageData,
+          },
+        });
       }
     }
 
@@ -280,16 +219,52 @@ export async function POST(request: Request) {
     for (const message of looseMessages) {
       if (!message.id || !message.conversationId) continue;
 
-      await ensureConversationFromMessage(message);
-      await upsertMessage(message);
+      await prisma.hibotConversation.upsert({
+        where: {
+          id: message.conversationId,
+        },
+        update: {},
+        create: {
+          id: message.conversationId,
+          raw: toPrismaJson({
+            createdFromMessageWebhook: true,
+            conversationId: message.conversationId,
+          }),
+        },
+      });
+
+      const messageData = {
+        correlationId: message.correlationId ?? null,
+        createdAtHibot: parseDate(message.created),
+        sender: message.sender ?? null,
+        recipient: message.recipient ?? null,
+        from: message.from ?? null,
+        content: message.content ?? null,
+        media: message.media ?? null,
+        mediaType: message.mediaType ?? null,
+        status: message.status ?? null,
+        errorDescription: message.errorDescription ?? null,
+        raw: toPrismaJson(message),
+      };
+
+      await prisma.hibotMessage.upsert({
+        where: {
+          id: message.id,
+        },
+        update: messageData,
+        create: {
+          id: message.id,
+          conversationId: message.conversationId,
+          ...messageData,
+        },
+      });
     }
 
     return NextResponse.json({
       ok: true,
-      eventType,
+      eventType: getPayloadEventType(payload),
       conversations: conversations.length,
       messages: looseMessages.length,
-      acks: payload.acks?.length ?? 0,
     });
   } catch (error) {
     console.error("[HIBOT_WEBHOOK_ERROR]", error);
