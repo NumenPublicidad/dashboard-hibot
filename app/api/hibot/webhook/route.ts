@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 type HibotMessagePayload = {
   id?: string;
   correlationId?: string;
@@ -98,6 +101,25 @@ function getPayloadEventType(payload: HibotWebhookPayload) {
   return "UNKNOWN";
 }
 
+function getRequestSecret(request: Request) {
+  const url = new URL(request.url);
+
+  const authorizationHeader = request.headers.get("authorization");
+
+  const authorizationToken = authorizationHeader?.startsWith("Bearer ")
+    ? authorizationHeader.replace("Bearer ", "").trim()
+    : authorizationHeader?.trim() ?? null;
+
+  return (
+    request.headers.get("x-hibot-secret") ??
+    request.headers.get("token") ??
+    request.headers.get("x-token") ??
+    authorizationToken ??
+    url.searchParams.get("secret") ??
+    url.searchParams.get("token")
+  );
+}
+
 function getUnauthorizedResponse() {
   return NextResponse.json(
     {
@@ -113,9 +135,7 @@ function getUnauthorizedResponse() {
 export async function POST(request: Request) {
   try {
     const secret = process.env.HIBOT_WEBHOOK_SECRET;
-    const requestSecret =
-      request.headers.get("x-hibot-secret") ??
-      new URL(request.url).searchParams.get("secret");
+    const requestSecret = getRequestSecret(request);
 
     if (secret && requestSecret !== secret) {
       return getUnauthorizedResponse();
