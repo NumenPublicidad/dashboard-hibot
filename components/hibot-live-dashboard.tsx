@@ -1,25 +1,29 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
   Bot,
-  Clock,
+  CheckCircle2,
+  History,
   Loader2,
   MessageCircle,
+  Radio,
   RefreshCcw,
   Timer,
-  UserCheck,
+  UserRound,
   Users,
+  Zap,
 } from "lucide-react";
 import {
-  Bar,
-  BarChart,
   CartesianGrid,
+  Cell,
   Legend,
   Line,
   LineChart,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -48,25 +52,51 @@ const SERIES_COLORS = [
   "#f97316",
 ];
 
+const ORIGIN_COLORS: Record<string, string> = {
+  CONTACT: "#38bdf8",
+  BOT: "#a78bfa",
+  AGENT: "#34d399",
+  UNKNOWN: "#71717a",
+};
+
+const STYLES = {
+  card: "border-zinc-800/50 bg-zinc-900/50 backdrop-blur-md shadow-xl text-zinc-50 overflow-hidden",
+  tableHeader:
+    "bg-zinc-950/50 border-zinc-800 text-zinc-400 font-bold uppercase text-[10px] tracking-widest",
+  tableRow: "border-zinc-800/50 hover:bg-white/[0.02] transition-colors",
+  badge:
+    "px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tighter uppercase border",
+  input:
+    "h-9 rounded-lg border border-zinc-700 bg-zinc-950 px-3 text-xs text-zinc-200 outline-none focus:ring-1 focus:ring-sky-500/50 transition-all",
+};
+
 type HibotKpis = {
-  total: number;
-  assigned: number;
-  finished: number;
-  botOnly: number;
-  withAgent: number;
+  totalConversations: number;
+  totalMessages: number;
+  contactMessages: number;
+  botMessages: number;
+  agentMessages: number;
+  conversationsWithAgent: number;
+  conversationsWithoutAgent: number;
+  conversationsWithBot: number;
   answeredByAgent: number;
   notAnsweredByAgent: number;
   inactive: number;
   possibleAgentInactive: number;
   possibleUserInactive: number;
   averageFirstResponseSeconds: number;
+  totalActiveAgentHours: number;
+  totalInactiveAgentHours: number;
+  totalWorkWindowHours: number;
 };
 
 type AgentRankingItem = {
   agent: string;
   total: number;
-  assigned: number;
-  finished: number;
+  conversations: number;
+  agentMessages: number;
+  contactMessages: number;
+  botMessages: number;
   answered: number;
   notAnswered: number;
   inactive: number;
@@ -80,16 +110,33 @@ type AgentRankingItem = {
 type AttentionByAgent = {
   agent: string;
   total: number;
+  messages: number;
+  answered: number;
+  averageFirstResponseSeconds: number;
 };
 
-type ConversationsByDay = {
-  day: string;
-  total: number;
-};
-
-type AttentionByHour = {
+type MessageByHour = {
   hour: string;
+  CONTACT: number;
+  BOT: number;
+  AGENT: number;
+  UNKNOWN: number;
   total: number;
+};
+
+type MessageByDay = {
+  day: string;
+  CONTACT: number;
+  BOT: number;
+  AGENT: number;
+  UNKNOWN: number;
+  total: number;
+};
+
+type MessageOrigin = {
+  name: string;
+  key: string;
+  value: number;
 };
 
 type AttentionByHourByAgent = Record<string, string | number> & {
@@ -101,6 +148,35 @@ type AgentActivitySummary = {
   firstHour: string | null;
   lastHour: string | null;
   activeHoursCount: number;
+  inactiveHoursCount: number;
+  workWindowHours: number;
+  messages: number;
+  conversations: number;
+  averageFirstResponseSeconds: number;
+};
+
+type LastEvent = {
+  id: string;
+  eventType: string;
+  createdAt: string;
+  summary: string;
+};
+
+type LastMessage = {
+  id: string;
+  conversationId: string;
+  from: "CONTACT" | "BOT" | "AGENT" | "UNKNOWN";
+  sender: string | null;
+  content: string | null;
+  createdAtHibot: string | null;
+};
+
+type ConversationWithoutHumanResponse = {
+  id: string;
+  lastMessageAt: string | null;
+  lastMessageFrom: string;
+  lastContent: string | null;
+  messages: number;
 };
 
 type MetricsResponse = {
@@ -111,42 +187,64 @@ type MetricsResponse = {
   };
   agents: string[];
   kpis: HibotKpis;
+  webhookMonitor: {
+    totalEvents: number;
+    eventsByType: Record<string, number>;
+    lastEvents: LastEvent[];
+  };
   rankings: {
-    inactivityByAgent: AgentRankingItem[];
+    agents: AgentRankingItem[];
     slowestAgents: AgentRankingItem[];
+    conversationsWithoutHumanResponse: ConversationWithoutHumanResponse[];
   };
   charts: {
     attentionsByAgent: AttentionByAgent[];
-    conversationsByDay: ConversationsByDay[];
-    attentionsByHour: AttentionByHour[];
+    messagesByHour: MessageByHour[];
+    messagesByDay: MessageByDay[];
+    messageOrigins: MessageOrigin[];
     attentionsByHourByAgent: AttentionByHourByAgent[];
   };
   agentActivitySummary: AgentActivitySummary[];
+  lastMessages: LastMessage[];
 };
 
-function formatSeconds(value: number | null | undefined) {
+const formatSeconds = (value: number | null | undefined) => {
   if (!value || value <= 0) return "0s";
 
   const hours = Math.floor(value / 3600);
   const minutes = Math.floor((value % 3600) / 60);
-  const seconds = value % 60;
+  const seconds = Math.round(value % 60);
 
   if (hours > 0) return `${hours}h ${minutes}m`;
   if (minutes > 0) return `${minutes}m ${seconds}s`;
 
   return `${seconds}s`;
-}
+};
 
-function formatPercent(value: number, total: number) {
-  if (!total) return "0%";
-  return `${Math.round((value / total) * 100)}%`;
-}
+const formatPercent = (value: number, total: number) => {
+  return total ? `${Math.round((value / total) * 100)}%` : "0%";
+};
 
-function buildQuery(params: {
+const formatDateTime = (value: string | null | undefined) => {
+  if (!value) return "-";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "-";
+
+  return new Intl.DateTimeFormat("es-AR", {
+    hour: "2-digit",
+    minute: "2-digit",
+    day: "2-digit",
+    month: "2-digit",
+  }).format(date);
+};
+
+const buildQuery = (params: {
   dateFrom: string;
   dateTo: string;
   selectedAgent: string;
-}) {
+}) => {
   const searchParams = new URLSearchParams();
 
   if (params.dateFrom) searchParams.set("dateFrom", params.dateFrom);
@@ -158,45 +256,87 @@ function buildQuery(params: {
   const query = searchParams.toString();
 
   return query ? `/api/hibot/metrics?${query}` : "/api/hibot/metrics";
-}
+};
 
-function tooltipStyle() {
-  return {
-    backgroundColor: "#09090b",
-    border: "1px solid #27272a",
-    borderRadius: "12px",
-    color: "#fafafa",
-  };
-}
+const tooltipStyle = {
+  backgroundColor: "#09090b",
+  border: "1px solid #27272a",
+  borderRadius: "8px",
+  color: "#fafafa",
+  fontSize: "12px",
+};
 
 function KpiCard({
   title,
   value,
   helper,
   icon,
+  tone = "sky",
 }: {
   title: string;
   value: string | number;
   helper?: string;
   icon: React.ReactNode;
+  tone?: "sky" | "emerald" | "amber" | "red" | "violet" | "zinc";
 }) {
+  const toneClass = {
+    sky: "text-sky-400 group-hover:border-sky-500/30",
+    emerald: "text-emerald-400 group-hover:border-emerald-500/30",
+    amber: "text-amber-400 group-hover:border-amber-500/30",
+    red: "text-red-400 group-hover:border-red-500/30",
+    violet: "text-violet-400 group-hover:border-violet-500/30",
+    zinc: "text-zinc-400 group-hover:border-zinc-500/30",
+  }[tone];
+
   return (
-    <Card className="border-zinc-800 bg-zinc-900 text-zinc-50">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium text-zinc-400">
-          {title}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-end justify-between gap-3">
-          <div>
-            <p className="text-3xl font-bold tracking-tight">{value}</p>
-            {helper && <p className="mt-1 text-xs text-zinc-500">{helper}</p>}
+    <Card className={`${STYLES.card} group transition-all duration-300`}>
+      <CardContent className="p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1">
+            <p className="text-[10px] font-black uppercase tracking-[0.15em] text-zinc-500 group-hover:text-zinc-300 transition-colors">
+              {title}
+            </p>
+            <p className="text-3xl font-bold tracking-tighter text-zinc-100">
+              {value}
+            </p>
+            {helper && (
+              <p className="w-fit rounded bg-zinc-800/50 px-1.5 py-0.5 text-[11px] font-medium text-zinc-500">
+                {helper}
+              </p>
+            )}
           </div>
-          <div className="text-sky-400">{icon}</div>
+
+          <div
+            className={`rounded-xl border border-zinc-800 bg-zinc-950 p-2.5 transition-transform group-hover:scale-110 ${toneClass}`}
+          >
+            {icon}
+          </div>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function OriginPill({ origin }: { origin: string }) {
+  const color =
+    origin === "CONTACT"
+      ? "border-sky-500/30 bg-sky-500/10 text-sky-400"
+      : origin === "BOT"
+        ? "border-violet-500/30 bg-violet-500/10 text-violet-400"
+        : origin === "AGENT"
+          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+          : "border-zinc-700 bg-zinc-800 text-zinc-400";
+
+  return <span className={`${STYLES.badge} ${color}`}>{origin}</span>;
+}
+
+function EmptyRow({ colSpan, label }: { colSpan: number; label: string }) {
+  return (
+    <TableRow className={STYLES.tableRow}>
+      <TableCell colSpan={colSpan} className="h-20 text-center text-xs text-zinc-500">
+        {label}
+      </TableCell>
+    </TableRow>
   );
 }
 
@@ -225,7 +365,7 @@ export function HibotLiveDashboard() {
         );
 
         if (!response.ok) {
-          throw new Error("No se pudieron cargar las métricas de Hibot.");
+          throw new Error("Error de conexión con el servidor.");
         }
 
         const payload = (await response.json()) as MetricsResponse;
@@ -233,9 +373,7 @@ export function HibotLiveDashboard() {
         setData(payload);
         setLastUpdated(new Date());
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "Error inesperado.";
-        setError(message);
+        setError(err instanceof Error ? err.message : "Error inesperado.");
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -251,9 +389,7 @@ export function HibotLiveDashboard() {
   useEffect(() => {
     if (!autoRefresh) return;
 
-    const interval = window.setInterval(() => {
-      loadMetrics("refresh");
-    }, 60000);
+    const interval = window.setInterval(() => loadMetrics("refresh"), 60000);
 
     return () => window.clearInterval(interval);
   }, [autoRefresh, loadMetrics]);
@@ -264,63 +400,71 @@ export function HibotLiveDashboard() {
     const keys = new Set<string>();
 
     data.charts.attentionsByHourByAgent.forEach((row) => {
-      Object.keys(row).forEach((key) => {
-        if (key !== "hour") keys.add(key);
-      });
+      Object.keys(row).forEach((key) => key !== "hour" && keys.add(key));
     });
 
     return Array.from(keys);
   }, [data]);
 
-  const topInactivityRanking = useMemo(() => {
-    return data?.rankings.inactivityByAgent.slice(0, 10) ?? [];
+  const slowestAgents = useMemo(() => {
+    return (
+      data?.rankings.slowestAgents
+        .filter((agent) => agent.averageFirstResponseSeconds > 0)
+        .slice(0, 10) ?? []
+    );
   }, [data]);
 
-  const slowestAgents = useMemo(() => {
-    return data?.rankings.slowestAgents.slice(0, 10) ?? [];
-  }, [data]);
+  const eventsByType = data?.webhookMonitor.eventsByType ?? {};
+  const kpis = data?.kpis;
 
   if (loading) {
     return (
-      <Card className="border-zinc-800 bg-zinc-900 text-zinc-50">
-        <CardContent className="flex min-h-[320px] items-center justify-center">
-          <div className="flex items-center gap-3 text-zinc-400">
-            <Loader2 className="h-5 w-5 animate-spin text-sky-400" />
-            Cargando métricas en tiempo real...
-          </div>
-        </CardContent>
-      </Card>
+      <div className="flex min-h-[400px] flex-col items-center justify-center gap-4">
+        <Loader2 className="h-10 w-10 animate-spin text-sky-500 opacity-50" />
+        <p className="text-xs font-bold uppercase tracking-[0.2em] text-zinc-500">
+          Sincronizando...
+        </p>
+      </div>
     );
   }
 
-  const kpis = data?.kpis;
-
   return (
-    <div className="flex flex-col gap-6">
-      <Card className="border-zinc-800 bg-zinc-900/80 text-zinc-50 shadow-xl">
-        <CardHeader className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2 text-xl">
-              <Activity className="h-5 w-5 text-sky-400" />
-              Tiempo real Hibot
-            </CardTitle>
-            <p className="mt-2 max-w-3xl text-sm text-zinc-400">
-              Métricas calculadas desde los webhooks de conversaciones y mensajes.
-              Sirve para controlar carga laboral, saturación por hora, respuestas e
-              inactividad.
+    <div className="mx-auto flex max-w-[1600px] flex-col gap-6 p-2 animate-in fade-in duration-500 md:p-6">
+      <Card className="border-zinc-800 bg-gradient-to-br from-zinc-900 to-black text-zinc-50">
+        <CardHeader className="flex flex-col gap-6 py-8 xl:flex-row xl:items-center xl:justify-between">
+          <div className="space-y-1">
+            <div className="flex flex-wrap items-center gap-3">
+              <Activity className="h-6 w-6 text-sky-400" />
+
+              <CardTitle className="text-2xl font-black tracking-tighter">
+                Panel de atención Hibot
+              </CardTitle>
+
+              <div className="flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5">
+                <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                <span className="text-[10px] font-bold uppercase tracking-tighter text-emerald-500">
+                  En Vivo
+                </span>
+              </div>
+            </div>
+
+            <p className="text-sm font-medium text-zinc-400">
+              Resumen de mensajes, respuestas humanas, actividad de agentes,
+              horas activas, horas sin actividad y demanda por horario.
             </p>
+
             {lastUpdated && (
-              <p className="mt-2 text-xs text-zinc-500">
+              <p className="text-xs font-medium text-zinc-600">
                 Última actualización: {lastUpdated.toLocaleTimeString("es-AR")}
               </p>
             )}
           </div>
 
-          <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-center lg:justify-end">
+          <div className="flex flex-wrap items-center gap-2">
             <select
               value={selectedAgent}
               onChange={(event) => setSelectedAgent(event.target.value)}
-              className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-sky-500"
+              className={STYLES.input}
             >
               <option value="all">Todos los agentes</option>
               {data?.agents.map((agent) => (
@@ -330,25 +474,19 @@ export function HibotLiveDashboard() {
               ))}
             </select>
 
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-zinc-500">Desde</span>
-              <input
-                type="date"
-                value={dateFrom}
-                onChange={(event) => setDateFrom(event.target.value)}
-                className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-sky-500"
-              />
-            </div>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(event) => setDateFrom(event.target.value)}
+              className={STYLES.input}
+            />
 
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-zinc-500">Hasta</span>
-              <input
-                type="date"
-                value={dateTo}
-                onChange={(event) => setDateTo(event.target.value)}
-                className="h-10 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-sky-500"
-              />
-            </div>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(event) => setDateTo(event.target.value)}
+              className={STYLES.input}
+            />
 
             {(dateFrom || dateTo || selectedAgent !== "all") && (
               <Button
@@ -359,26 +497,17 @@ export function HibotLiveDashboard() {
                   setDateTo("");
                   setSelectedAgent("all");
                 }}
-                className="border-zinc-700 bg-zinc-950 text-zinc-100 hover:bg-zinc-800"
+                className="h-9 rounded-lg border-zinc-700 bg-zinc-950 px-3 text-xs font-bold uppercase tracking-wide text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
               >
                 Limpiar filtros
               </Button>
             )}
 
-            <label className="flex h-10 items-center gap-2 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-300">
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(event) => setAutoRefresh(event.target.checked)}
-              />
-              Auto 60s
-            </label>
-
             <Button
               type="button"
               onClick={() => loadMetrics("refresh")}
               disabled={refreshing}
-              className="bg-sky-500 text-zinc-950 hover:bg-sky-400"
+              className="h-9 rounded-lg bg-sky-500 px-4 font-bold text-black hover:bg-sky-400"
             >
               {refreshing ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -387,376 +516,118 @@ export function HibotLiveDashboard() {
               )}
               Actualizar
             </Button>
+
+            <label className="flex h-9 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(event) => setAutoRefresh(event.target.checked)}
+                className="accent-sky-500"
+              />
+              <span className="text-[10px] font-bold uppercase text-zinc-500">
+                Auto
+              </span>
+            </label>
           </div>
         </CardHeader>
 
         {error && (
-          <CardContent>
-            <p className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-200">
+          <div className="px-6 pb-6">
+            <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-xs font-bold text-red-400">
               {error}
-            </p>
-          </CardContent>
+            </div>
+          </div>
         )}
       </Card>
 
       {kpis && (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <KpiCard
-              title="Conversaciones totales"
-              value={kpis.total}
-              helper={`${kpis.finished} finalizadas`}
-              icon={<MessageCircle className="h-5 w-5" />}
-            />
-            <KpiCard
-              title="Derivadas a agentes"
-              value={kpis.withAgent}
-              helper={`${formatPercent(kpis.withAgent, kpis.total)} del total`}
-              icon={<Users className="h-5 w-5" />}
-            />
-            <KpiCard
-              title="Solo bot"
-              value={kpis.botOnly}
-              helper={`${formatPercent(kpis.botOnly, kpis.total)} del total`}
-              icon={<Bot className="h-5 w-5" />}
-            />
-            <KpiCard
-              title="Respuesta promedio"
-              value={formatSeconds(kpis.averageFirstResponseSeconds)}
-              helper="Primer contacto → agente"
-              icon={<Timer className="h-5 w-5" />}
-            />
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-8">
+            <KpiCard title="Total mensajes" value={kpis.totalMessages.toLocaleString()} helper={`${kpis.totalConversations} conversaciones`} icon={<MessageCircle size={20} />} tone="sky" />
+            <KpiCard title="Mensajes usuarios" value={kpis.contactMessages.toLocaleString()} helper={formatPercent(kpis.contactMessages, kpis.totalMessages)} icon={<UserRound size={20} />} tone="sky" />
+            <KpiCard title="Respuestas bot" value={kpis.botMessages.toLocaleString()} helper={formatPercent(kpis.botMessages, kpis.totalMessages)} icon={<Bot size={20} />} tone="violet" />
+            <KpiCard title="Respuestas humanas" value={kpis.agentMessages.toLocaleString()} helper={formatPercent(kpis.agentMessages, kpis.totalMessages)} icon={<Users size={20} />} tone="emerald" />
+            <KpiCard title="Atendidas agente" value={kpis.conversationsWithAgent} helper={formatPercent(kpis.conversationsWithAgent, kpis.totalConversations)} icon={<CheckCircle2 size={20} />} tone="emerald" />
+            <KpiCard title="Sin respuesta humana" value={kpis.conversationsWithoutAgent} helper={formatPercent(kpis.conversationsWithoutAgent, kpis.totalConversations)} icon={<AlertTriangle size={20} />} tone="amber" />
+            <KpiCard title="Respuesta promedio" value={formatSeconds(kpis.averageFirstResponseSeconds)} helper="Usuario → agente" icon={<Timer size={20} />} tone="sky" />
+            <KpiCard title="Eventos recibidos" value={data?.webhookMonitor.totalEvents ?? 0} helper={`MSG: ${eventsByType.MESSAGES ?? 0}`} icon={<Radio size={20} />} tone="zinc" />
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            <KpiCard
-              title="Respondidas por agente"
-              value={kpis.answeredByAgent}
-              helper={`${formatPercent(kpis.answeredByAgent, kpis.withAgent)} de derivadas`}
-              icon={<UserCheck className="h-5 w-5" />}
-            />
-            <KpiCard
-              title="Sin respuesta de agente"
-              value={kpis.notAnsweredByAgent}
-              helper={`${formatPercent(kpis.notAnsweredByAgent, kpis.withAgent)} de derivadas`}
-              icon={<AlertTriangle className="h-5 w-5" />}
-            />
-            <KpiCard
-              title="Cierres por inactividad"
-              value={kpis.inactive}
-              helper="Typing o nota incluye inactividad"
-              icon={<Clock className="h-5 w-5" />}
-            />
-            <KpiCard
-              title="Probable inactividad agente"
-              value={kpis.possibleAgentInactive}
-              helper="Último mensaje fue del usuario"
-              icon={<AlertTriangle className="h-5 w-5" />}
-            />
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <KpiCard title="Horas activas agentes" value={`${kpis.totalActiveAgentHours}h`} helper="Horas con mensajes AGENT" icon={<Activity size={20} />} tone="emerald" />
+            <KpiCard title="Horas sin actividad" value={`${kpis.totalInactiveAgentHours}h`} helper="Dentro del rango inicio-fin" icon={<AlertTriangle size={20} />} tone="amber" />
+            <KpiCard title="Rango operativo" value={`${kpis.totalWorkWindowHours}h`} helper="Suma de ventanas por agente" icon={<History size={20} />} tone="violet" />
           </div>
         </>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Card className="border-zinc-800 bg-zinc-900 text-zinc-50">
-          <CardHeader>
-            <CardTitle>👨‍💻 Carga laboral: atenciones por agente</CardTitle>
+      <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
+        <Card className={STYLES.card}>
+          <CardHeader className="border-b border-zinc-800/50">
+            <CardTitle className="flex items-center gap-2 text-sm font-bold"><History size={16} className="text-sky-400" />Demanda por hora</CardTitle>
+            <p className="text-xs text-zinc-500">Muestra en qué horarios escriben los usuarios y cómo responden bot y agentes.</p>
           </CardHeader>
-          <CardContent>
-            <div className="h-[380px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={data?.charts.attentionsByAgent ?? []}
-                  margin={{ top: 10, right: 20, left: 10, bottom: 80 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-                  <XAxis
-                    dataKey="agent"
-                    stroke="#a1a1aa"
-                    interval={0}
-                    angle={-28}
-                    textAnchor="end"
-                    tick={{ fontSize: 12 }}
-                  />
-                  <YAxis stroke="#a1a1aa" />
-                  <Tooltip
-                    contentStyle={tooltipStyle()}
-                    itemStyle={{ color: "#fafafa" }}
-                    labelStyle={{ color: "#fafafa" }}
-                  />
-                  <Bar dataKey="total" fill="#38bdf8" radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
+          <CardContent className="pt-6"><div className="h-[350px] w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={data?.charts.messagesByHour}><CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} /><XAxis dataKey="hour" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} /><YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} allowDecimals={false} /><Tooltip contentStyle={tooltipStyle} itemStyle={{ color: "#fafafa" }} labelStyle={{ color: "#fafafa" }} /><Legend iconType="circle" wrapperStyle={{ paddingTop: "20px", fontSize: "10px", fontWeight: "bold" }} /><Line type="monotone" dataKey="CONTACT" name="Usuarios" stroke="#38bdf8" strokeWidth={3} dot={false} activeDot={{ r: 6 }} /><Line type="monotone" dataKey="BOT" name="Bot" stroke="#a78bfa" strokeWidth={3} dot={false} activeDot={{ r: 6 }} /><Line type="monotone" dataKey="AGENT" name="Agentes" stroke="#34d399" strokeWidth={3} dot={false} activeDot={{ r: 6 }} /></LineChart></ResponsiveContainer></div></CardContent>
         </Card>
 
-        <Card className="border-zinc-800 bg-zinc-900 text-zinc-50">
-          <CardHeader>
-            <CardTitle>⏰ Atenciones por hora</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="h-[380px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data?.charts.attentionsByHour ?? []}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-                  <XAxis dataKey="hour" stroke="#a1a1aa" />
-                  <YAxis stroke="#a1a1aa" />
-                  <Tooltip
-                    contentStyle={tooltipStyle()}
-                    itemStyle={{ color: "#fafafa" }}
-                    labelStyle={{ color: "#fafafa" }}
-                  />
-                  <Bar dataKey="total" fill="#38bdf8" radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
+        <Card className={STYLES.card}>
+          <CardHeader className="border-b border-zinc-800/50"><CardTitle className="text-sm font-bold uppercase tracking-widest">Origen de mensajes</CardTitle><p className="text-xs text-zinc-500">Proporción entre usuarios, bot y agentes.</p></CardHeader>
+          <CardContent className="pt-6"><div className="h-[300px] w-full"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={data?.charts.messageOrigins} dataKey="value" nameKey="name" innerRadius={80} outerRadius={110} paddingAngle={8} stroke="none">{data?.charts.messageOrigins.map((entry) => (<Cell key={entry.key} fill={ORIGIN_COLORS[entry.key] || "#71717a"} />))}</Pie><Tooltip contentStyle={tooltipStyle} itemStyle={{ color: "#fafafa" }} labelStyle={{ color: "#fafafa" }} /><Legend /></PieChart></ResponsiveContainer></div></CardContent>
         </Card>
       </div>
 
-      <Card className="border-zinc-800 bg-zinc-900 text-zinc-50">
-        <CardHeader>
-          <CardTitle>🚨 Atenciones por hora y agente</CardTitle>
-          <p className="text-sm text-zinc-400">
-            Saturación operativa. Muestra los agentes con más volumen para evitar
-            que el gráfico se vuelva ilegible.
-          </p>
-        </CardHeader>
-        <CardContent>
-          <div className="h-[420px] w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data?.charts.attentionsByHourByAgent ?? []}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-                <XAxis dataKey="hour" stroke="#a1a1aa" />
-                <YAxis stroke="#a1a1aa" />
-                <Tooltip
-                  contentStyle={tooltipStyle()}
-                  itemStyle={{ color: "#fafafa" }}
-                  labelStyle={{ color: "#fafafa" }}
-                />
-                <Legend />
-                {hourlyAgentKeys.map((agent, index) => (
-                  <Line
-                    key={agent}
-                    type="monotone"
-                    dataKey={agent}
-                    stroke={SERIES_COLORS[index % SERIES_COLORS.length]}
-                    strokeWidth={2}
-                    dot={{ r: 3 }}
-                    activeDot={{ r: 5 }}
-                  />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Card className="border-zinc-800 bg-zinc-900 text-zinc-50">
-          <CardHeader>
-            <CardTitle>📅 Conversaciones por día</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="h-[320px] w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={data?.charts.conversationsByDay ?? []}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" />
-                  <XAxis dataKey="day" stroke="#a1a1aa" />
-                  <YAxis stroke="#a1a1aa" />
-                  <Tooltip
-                    contentStyle={tooltipStyle()}
-                    itemStyle={{ color: "#fafafa" }}
-                    labelStyle={{ color: "#fafafa" }}
-                  />
-                  <Bar dataKey="total" fill="#38bdf8" radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </CardContent>
+      <div className="grid gap-6 xl:grid-cols-2">
+        <Card className={STYLES.card}>
+          <CardHeader className="border-b border-zinc-800/50"><CardTitle className="text-sm font-bold">Carga laboral por agente</CardTitle><p className="text-xs text-zinc-500">Conversaciones, mensajes respondidos y demora promedio de cada agente.</p></CardHeader>
+          <CardContent className="space-y-4 pt-6">{data?.charts.attentionsByAgent.slice(0, 8).length ? (data.charts.attentionsByAgent.slice(0, 8).map((agent) => { const max = Math.max(...(data?.charts.attentionsByAgent.map((item) => item.total) || [1])); return (<div key={agent.agent} className="space-y-2"><div className="flex items-end justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-tight text-zinc-100">{agent.agent}</p><p className="text-[10px] font-medium text-zinc-500">{agent.messages} mensajes · {agent.answered} conversaciones respondidas · resp. prom. {formatSeconds(agent.averageFirstResponseSeconds)}</p></div><p className="text-lg font-black text-sky-400">{agent.total}</p></div><div className="h-1.5 overflow-hidden rounded-full bg-zinc-800"><div className="h-full rounded-full bg-sky-500 transition-all duration-1000" style={{ width: `${(agent.total / max) * 100}%` }} /></div></div>); })) : (<p className="rounded-lg border border-zinc-800 bg-zinc-950 p-6 text-center text-xs text-zinc-500">Todavía no hay mensajes de agentes reales.</p>)}</CardContent>
         </Card>
 
-        <Card className="border-zinc-800 bg-zinc-900 text-zinc-50">
-          <CardHeader>
-            <CardTitle>🕒 Horas activas por agente</CardTitle>
-            <p className="text-sm text-zinc-400">
-              No es login/logout. Es primera y última conversación registrada con
-              actividad del agente.
-            </p>
-          </CardHeader>
-          <CardContent>
-            <div className="overflow-x-auto rounded-xl border border-zinc-800">
-              <Table>
-                <TableHeader>
-                  <TableRow className="border-zinc-800 hover:bg-zinc-900">
-                    <TableHead className="text-zinc-300">Agente</TableHead>
-                    <TableHead className="text-zinc-300">Primera hora</TableHead>
-                    <TableHead className="text-zinc-300">Última hora</TableHead>
-                    <TableHead className="text-zinc-300">Horas activas</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {data?.agentActivitySummary.length ? (
-                    data.agentActivitySummary.map((item) => (
-                      <TableRow
-                        key={item.agent}
-                        className="border-zinc-800 hover:bg-zinc-800/60"
-                      >
-                        <TableCell className="font-medium text-zinc-100">
-                          {item.agent}
-                        </TableCell>
-                        <TableCell className="text-zinc-300">
-                          {item.firstHour ? `${item.firstHour}:00` : "-"}
-                        </TableCell>
-                        <TableCell className="text-zinc-300">
-                          {item.lastHour ? `${item.lastHour}:00` : "-"}
-                        </TableCell>
-                        <TableCell className="text-zinc-300">
-                          {item.activeHoursCount}
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  ) : (
-                    <TableRow className="border-zinc-800">
-                      <TableCell
-                        colSpan={4}
-                        className="h-24 text-center text-zinc-500"
-                      >
-                        No hay actividad de agentes todavía.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </CardContent>
+        <Card className={STYLES.card}>
+          <CardHeader className="border-b border-zinc-800/50"><CardTitle className="text-sm font-bold">Evolución diaria</CardTitle><p className="text-xs text-zinc-500">Permite ver si la demanda crece o baja por día.</p></CardHeader>
+          <CardContent className="pt-6"><div className="h-[280px] w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={data?.charts.messagesByDay}><CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} /><XAxis dataKey="day" stroke="#52525b" fontSize={10} axisLine={false} tickLine={false} /><YAxis stroke="#52525b" fontSize={10} axisLine={false} tickLine={false} allowDecimals={false} /><Tooltip contentStyle={tooltipStyle} itemStyle={{ color: "#fafafa" }} labelStyle={{ color: "#fafafa" }} /><Legend iconType="circle" wrapperStyle={{ fontSize: "10px", fontWeight: "bold" }} /><Line type="monotone" dataKey="CONTACT" name="Usuarios" stroke="#38bdf8" strokeWidth={3} dot={false} activeDot={{ r: 6 }} /><Line type="monotone" dataKey="BOT" name="Bot" stroke="#a78bfa" strokeWidth={2} strokeDasharray="5 5" dot={false} /><Line type="monotone" dataKey="AGENT" name="Agentes" stroke="#34d399" strokeWidth={3} dot={false} activeDot={{ r: 6 }} /></LineChart></ResponsiveContainer></div></CardContent>
         </Card>
       </div>
 
-      <Card className="border-zinc-800 bg-zinc-900 text-zinc-50">
-        <CardHeader>
-          <CardTitle>Ranking de inactividad</CardTitle>
-          <p className="text-sm text-zinc-400">
-            Prioriza agentes con probable inactividad del agente, conversaciones
-            sin respuesta y cierres por inactividad.
-          </p>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto rounded-xl border border-zinc-800">
-            <Table>
-              <TableHeader>
-                <TableRow className="border-zinc-800 hover:bg-zinc-900">
-                  <TableHead className="text-zinc-300">Agente</TableHead>
-                  <TableHead className="text-zinc-300">Total</TableHead>
-                  <TableHead className="text-zinc-300">Respondidas</TableHead>
-                  <TableHead className="text-zinc-300">Sin respuesta</TableHead>
-                  <TableHead className="text-zinc-300">Inactividad</TableHead>
-                  <TableHead className="text-zinc-300">
-                    Prob. inactividad agente
-                  </TableHead>
-                  <TableHead className="text-zinc-300">
-                    Prob. inactividad usuario
-                  </TableHead>
-                  <TableHead className="text-zinc-300">Resp. prom.</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {topInactivityRanking.length ? (
-                  topInactivityRanking.map((item) => (
-                    <TableRow
-                      key={item.agent}
-                      className="border-zinc-800 hover:bg-zinc-800/60"
-                    >
-                      <TableCell className="font-medium text-zinc-100">
-                        {item.agent}
-                      </TableCell>
-                      <TableCell className="text-zinc-300">{item.total}</TableCell>
-                      <TableCell className="text-zinc-300">
-                        {item.answered}
-                      </TableCell>
-                      <TableCell className="text-zinc-300">
-                        {item.notAnswered}
-                      </TableCell>
-                      <TableCell className="text-zinc-300">
-                        {item.inactive}
-                      </TableCell>
-                      <TableCell className="text-zinc-300">
-                        {item.probableAgentInactivity}
-                      </TableCell>
-                      <TableCell className="text-zinc-300">
-                        {item.probableUserInactivity}
-                      </TableCell>
-                      <TableCell className="whitespace-nowrap text-zinc-300">
-                        {formatSeconds(item.averageFirstResponseSeconds)}
-                      </TableCell>
-                    </TableRow>
-                  ))
-                ) : (
-                  <TableRow className="border-zinc-800">
-                    <TableCell
-                      colSpan={8}
-                      className="h-24 text-center text-zinc-500"
-                    >
-                      No hay datos de inactividad todavía.
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        </CardContent>
+      <Card className={STYLES.card}>
+        <CardHeader className="border-b border-zinc-800/50"><CardTitle className="text-sm font-bold">Saturación horaria por agente</CardTitle><p className="text-xs text-zinc-500">Muestra en qué horario trabaja más cada agente y si la atención se concentra en pocas personas.</p></CardHeader>
+        <CardContent className="pt-8"><div className="h-[400px] w-full"><ResponsiveContainer width="100%" height="100%"><LineChart data={data?.charts.attentionsByHourByAgent}><CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} /><XAxis dataKey="hour" stroke="#52525b" fontSize={10} /><YAxis stroke="#52525b" fontSize={10} allowDecimals={false} /><Tooltip contentStyle={tooltipStyle} itemStyle={{ color: "#fafafa" }} labelStyle={{ color: "#fafafa" }} /><Legend wrapperStyle={{ fontSize: "10px", fontWeight: "bold", textTransform: "uppercase" }} />{hourlyAgentKeys.slice(0, 10).map((agent, index) => (<Line key={agent} type="monotone" dataKey={agent} stroke={SERIES_COLORS[index % SERIES_COLORS.length]} strokeWidth={2} dot={false} activeDot={{ r: 4 }} />))}</LineChart></ResponsiveContainer></div></CardContent>
       </Card>
 
-      <Card className="border-zinc-800 bg-zinc-900 text-zinc-50">
-        <CardHeader>
-          <CardTitle>Agentes con mayor demora promedio</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto rounded-xl border border-zinc-800">
-            <Table>
-              <TableHeader>
-                <TableRow className="border-zinc-800 hover:bg-zinc-900">
-                  <TableHead className="text-zinc-300">Agente</TableHead>
-                  <TableHead className="text-zinc-300">Conversaciones</TableHead>
-                  <TableHead className="text-zinc-300">Respondidas</TableHead>
-                  <TableHead className="text-zinc-300">Respuesta promedio</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {slowestAgents.length ? (
-                  slowestAgents.map((item) => (
-                    <TableRow
-                      key={item.agent}
-                      className="border-zinc-800 hover:bg-zinc-800/60"
-                    >
-                      <TableCell className="font-medium text-zinc-100">
-                        {item.agent}
-                      </TableCell>
-                      <TableCell className="text-zinc-300">{item.total}</TableCell>
-                      <TableCell className="text-zinc-300">
-                        {item.answered}
-                      </TableCell>
-                      <TableCell className="whitespace-nowrap text-zinc-300">
-                        {formatSeconds(item.averageFirstResponseSeconds)}
-                      </TableCell>
-                    </TableRow>
-                  ))
-                ) : (
-                  <TableRow className="border-zinc-800">
-                    <TableCell
-                      colSpan={4}
-                      className="h-24 text-center text-zinc-500"
-                    >
-                      No hay respuestas de agentes todavía.
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        </CardContent>
+      <div className="grid gap-6 xl:grid-cols-2">
+        <Card className={STYLES.card}>
+          <div className="border-b border-zinc-800 p-4"><CardTitle className="text-xs font-bold uppercase tracking-widest text-zinc-400">Ranking de agentes</CardTitle><p className="mt-1 text-xs text-zinc-500">Responde quién trabajó más y quién respondió más lento.</p></div>
+          <Table><TableHeader><TableRow className={STYLES.tableHeader}><TableHead>Agente</TableHead><TableHead className="text-center">Conv.</TableHead><TableHead className="text-center">Msg.</TableHead><TableHead className="text-center">Sin resp.</TableHead><TableHead className="text-right">Resp.</TableHead></TableRow></TableHeader><TableBody>{data?.rankings.agents.length ? (data.rankings.agents.slice(0, 10).map((item) => (<TableRow key={item.agent} className={STYLES.tableRow}><TableCell className="font-bold text-zinc-200">{item.agent}</TableCell><TableCell className="text-center font-mono text-xs text-zinc-400">{item.conversations}</TableCell><TableCell className="text-center font-mono text-xs text-zinc-400">{item.agentMessages}</TableCell><TableCell className="text-center font-mono text-xs text-amber-400">{item.notAnswered}</TableCell><TableCell className="text-right text-xs font-black text-sky-400">{formatSeconds(item.averageFirstResponseSeconds)}</TableCell></TableRow>))) : (<EmptyRow colSpan={5} label="Todavía no hay actividad de agentes." />)}</TableBody></Table>
+        </Card>
+
+        <Card className={STYLES.card}>
+          <div className="border-b border-zinc-800 p-4"><CardTitle className="text-xs font-bold uppercase tracking-widest text-zinc-400">Carga horaria por agente</CardTitle><p className="mt-1 text-xs text-zinc-500">“Sin actividad” es estimado: horas dentro del rango inicio-fin sin mensajes AGENT.</p></div>
+          <Table><TableHeader><TableRow className={STYLES.tableHeader}><TableHead>Agente</TableHead><TableHead>Inicio</TableHead><TableHead>Fin</TableHead><TableHead className="text-right">Rango</TableHead><TableHead className="text-right">Activas</TableHead><TableHead className="text-right">Sin act.</TableHead><TableHead className="text-right">Msg.</TableHead></TableRow></TableHeader><TableBody>{data?.agentActivitySummary.length ? (data.agentActivitySummary.slice(0, 12).map((item) => (<TableRow key={item.agent} className={STYLES.tableRow}><TableCell className="text-xs font-bold text-zinc-200">{item.agent}</TableCell><TableCell className="font-mono text-[10px] text-zinc-500">{item.firstHour ? `${item.firstHour}:00` : "--"}</TableCell><TableCell className="font-mono text-[10px] text-zinc-500">{item.lastHour ? `${item.lastHour}:00` : "--"}</TableCell><TableCell className="text-right font-black text-zinc-300">{item.workWindowHours}h</TableCell><TableCell className="text-right font-black text-emerald-400">{item.activeHoursCount}h</TableCell><TableCell className="text-right font-black text-amber-400">{item.inactiveHoursCount}h</TableCell><TableCell className="text-right font-black text-sky-400">{item.messages}</TableCell></TableRow>))) : (<EmptyRow colSpan={7} label="Todavía no hay horarios de agentes." />)}</TableBody></Table>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-2">
+        <Card className={STYLES.card}>
+          <div className="border-b border-zinc-800 bg-amber-500/5 p-4"><CardTitle className="text-[10px] font-black uppercase tracking-widest text-amber-500">Conversaciones sin respuesta humana</CardTitle><p className="mt-1 text-xs text-zinc-500">Conversaciones donde escribió un usuario y todavía no detectamos mensajes AGENT.</p></div>
+          <Table><TableHeader><TableRow className={STYLES.tableHeader}><TableHead>Último msg.</TableHead><TableHead>Origen</TableHead><TableHead>Msgs.</TableHead><TableHead>Contenido</TableHead></TableRow></TableHeader><TableBody>{data?.rankings.conversationsWithoutHumanResponse.length ? (data.rankings.conversationsWithoutHumanResponse.slice(0, 8).map((item) => (<TableRow key={item.id} className={STYLES.tableRow}><TableCell className="font-mono text-[10px] text-zinc-500">{formatDateTime(item.lastMessageAt)}</TableCell><TableCell><OriginPill origin={item.lastMessageFrom} /></TableCell><TableCell className="font-mono text-xs text-zinc-400">{item.messages}</TableCell><TableCell className="max-w-[240px] truncate text-xs text-zinc-300">{item.lastContent || "..."}</TableCell></TableRow>))) : (<EmptyRow colSpan={4} label="No hay conversaciones pendientes sin respuesta humana." />)}</TableBody></Table>
+        </Card>
+
+        <Card className={STYLES.card}>
+          <div className="border-b border-zinc-800 bg-sky-500/5 p-4"><CardTitle className="text-[10px] font-black uppercase tracking-widest text-sky-400">Últimos mensajes</CardTitle><p className="mt-1 text-xs text-zinc-500">Muestra lo último que llega por webhook.</p></div>
+          <Table><TableHeader><TableRow className={STYLES.tableHeader}><TableHead>Fecha/hora</TableHead><TableHead>Origen</TableHead><TableHead>Resumen</TableHead></TableRow></TableHeader><TableBody>{data?.lastMessages.length ? (data.lastMessages.slice(0, 8).map((message) => (<TableRow key={message.id} className={STYLES.tableRow}><TableCell className="font-mono text-[10px] text-zinc-500">{formatDateTime(message.createdAtHibot)}</TableCell><TableCell><OriginPill origin={message.from} /></TableCell><TableCell className="max-w-[240px] truncate text-xs text-zinc-300">{message.content || message.sender || "..."}</TableCell></TableRow>))) : (<EmptyRow colSpan={3} label="No hay mensajes recientes." />)}</TableBody></Table>
+        </Card>
+      </div>
+
+      <Card className={STYLES.card}>
+        <CardHeader className="border-b border-zinc-800/50 bg-sky-500/[0.02]"><CardTitle className="flex items-center gap-2 text-sm font-black"><Zap className="h-4 w-4 text-sky-400" />Monitor webhook</CardTitle><p className="text-xs text-zinc-500">Permite verificar si Hibot está enviando eventos correctamente.</p></CardHeader>
+        <CardContent className="pt-6"><div className="flex gap-2 overflow-x-auto pb-4">{Object.entries(eventsByType).map(([type, count]) => (<div key={type} className="min-w-[100px] flex-none rounded-lg border border-zinc-800 bg-zinc-950 p-3"><p className="text-[8px] font-black uppercase text-zinc-500">{type}</p><p className="text-lg font-black text-zinc-100">{count}</p></div>))}</div><Table><TableHeader><TableRow className={STYLES.tableHeader}><TableHead>Timestamp</TableHead><TableHead>Evento</TableHead><TableHead>Metadata</TableHead></TableRow></TableHeader><TableBody>{data?.webhookMonitor.lastEvents.length ? (data.webhookMonitor.lastEvents.slice(0, 6).map((event) => (<TableRow key={event.id} className={STYLES.tableRow}><TableCell className="font-mono text-[10px] text-zinc-500">{formatDateTime(event.createdAt)}</TableCell><TableCell className="text-[10px] font-bold text-zinc-300">{event.eventType}</TableCell><TableCell className="max-w-[500px] truncate text-[10px] text-zinc-500">{event.summary}</TableCell></TableRow>))) : (<EmptyRow colSpan={3} label="No hay eventos recibidos." />)}</TableBody></Table></CardContent>
       </Card>
+
+      {slowestAgents.length > 0 && (
+        <Card className="overflow-hidden border-red-500/20 bg-red-500/[0.02]">
+          <div className="border-b border-red-500/20 bg-red-500/10 p-4 text-xs font-black uppercase tracking-widest text-red-500">Agentes con mayor demora promedio</div>
+          <Table><TableHeader><TableRow className={STYLES.tableHeader}><TableHead>Agente</TableHead><TableHead className="text-center">Respondidas</TableHead><TableHead className="text-right">Demora prom.</TableHead></TableRow></TableHeader><TableBody>{slowestAgents.map((agent) => (<TableRow key={agent.agent} className="border-red-500/10 hover:bg-red-500/5"><TableCell className="font-bold text-zinc-200">{agent.agent}</TableCell><TableCell className="text-center text-xs text-zinc-500">{agent.answered}</TableCell><TableCell className="text-right font-black text-red-500">{formatSeconds(agent.averageFirstResponseSeconds)}</TableCell></TableRow>))}</TableBody></Table>
+        </Card>
+      )}
     </div>
   );
 }
