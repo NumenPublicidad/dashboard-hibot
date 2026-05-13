@@ -510,33 +510,70 @@ export async function GET(request: Request) {
     const agentActivityMap = new Map<string, { firstAt: Date | null; lastAt: Date | null; activeHours: Set<string>; messages: number }>();
 
     filteredMessages.forEach((message) => {
-      if (!message.createdAtHibot) return;
-      const origin = normalizeOrigin(message.from);
-      const hour = getHourLabel(message.createdAtHibot);
-      const day = formatDay(message.createdAtHibot);
-      const hourRow = messagesByHourMap.get(hour) ?? makeEmptyHourlyRow(Number(hour));
-      hourRow[origin] += 1;
-      hourRow.total += 1;
-      messagesByHourMap.set(hour, hourRow);
+  if (!message.createdAtHibot) return;
 
-      const dayRow = messagesByDayMap.get(day) ?? { day, CONTACT: 0, BOT: 0, AGENT: 0, UNKNOWN: 0, total: 0 };
-      dayRow[origin] += 1;
-      dayRow.total += 1;
-      messagesByDayMap.set(day, dayRow);
+  const origin = normalizeOrigin(message.from);
+  const hour = getHourLabel(message.createdAtHibot);
+  const day = formatDay(message.createdAtHibot);
 
-      if (origin === "AGENT") {
-        const agentName = cleanAgentName(message.sender) ?? "Agente sin nombre";
-        const hourMap = agentHourlyMap.get(hour) ?? new Map<string, number>();
-        hourMap.set(agentName, (hourMap.get(agentName) ?? 0) + 1);
-        agentHourlyMap.set(hour, hourMap);
-        const activity = agentActivityMap.get(agentName) ?? { firstAt: null, lastAt: null, activeHours: new Set<string>(), messages: 0 };
-        activity.firstAt = !activity.firstAt || message.createdAtHibot < activity.firstAt ? message.createdAtHibot : activity.firstAt;
-        activity.lastAt = !activity.lastAt || message.createdAtHibot > activity.lastAt ? message.createdAtHibot : activity.lastAt;
-        activity.activeHours.add(hour);
-        activity.messages += 1;
-        agentActivityMap.set(agentName, activity);
-      }
-    });
+  const hourRow =
+    messagesByHourMap.get(hour) ?? makeEmptyHourlyRow(Number(hour));
+
+  hourRow[origin] += 1;
+  hourRow.total += 1;
+  messagesByHourMap.set(hour, hourRow);
+
+  const dayRow =
+    messagesByDayMap.get(day) ?? {
+      day,
+      CONTACT: 0,
+      BOT: 0,
+      AGENT: 0,
+      UNKNOWN: 0,
+      total: 0,
+    };
+
+  dayRow[origin] += 1;
+  dayRow.total += 1;
+  messagesByDayMap.set(day, dayRow);
+
+  if (origin === "AGENT") {
+    const agentName =
+      cleanAgentName(message.conversation.agentName) ??
+      cleanAgentName(message.sender) ??
+      "Agente sin nombre";
+
+    const hourMap = agentHourlyMap.get(hour) ?? new Map<string, number>();
+
+    hourMap.set(agentName, (hourMap.get(agentName) ?? 0) + 1);
+    agentHourlyMap.set(hour, hourMap);
+
+    const activity =
+      agentActivityMap.get(agentName) ?? {
+        firstAt: null,
+        lastAt: null,
+        activeHours: new Set<string>(),
+        messages: 0,
+      };
+
+    activity.firstAt =
+      !activity.firstAt || message.createdAtHibot < activity.firstAt
+        ? message.createdAtHibot
+        : activity.firstAt;
+
+    activity.lastAt =
+      !activity.lastAt || message.createdAtHibot > activity.lastAt
+        ? message.createdAtHibot
+        : activity.lastAt;
+
+    const dayHourKey = `${formatDay(message.createdAtHibot)} ${hour}`;
+    activity.activeHours.add(dayHourKey);
+
+    activity.messages += 1;
+
+    agentActivityMap.set(agentName, activity);
+  }
+});
 
     const messagesByHour = Array.from(messagesByHourMap.values());
     const messagesByDay = Array.from(messagesByDayMap.values()).sort((a, b) => {
@@ -571,10 +608,22 @@ export async function GET(request: Request) {
     const agentActivitySummary = Array.from(agentActivityMap.entries())
       .map(([agentName, activity]) => {
         const firstHour = activity.firstAt ? getHourLabel(activity.firstAt) : null;
-        const lastHour = activity.lastAt ? getHourLabel(activity.lastAt) : null;
-        const workWindowHours = calculateWorkWindow(firstHour, lastHour);
-        const activeHoursCount = activity.activeHours.size;
-        const inactiveHoursCount = Math.max(0, workWindowHours - activeHoursCount);
+const lastHour = activity.lastAt ? getHourLabel(activity.lastAt) : null;
+
+const activeHoursCount = activity.activeHours.size;
+
+const workWindowHours =
+  activity.firstAt && activity.lastAt
+    ? Math.max(
+        1,
+        Math.ceil(
+          (activity.lastAt.getTime() - activity.firstAt.getTime()) /
+            (1000 * 60 * 60),
+        ) + 1,
+      )
+    : 0;
+
+const inactiveHoursCount = Math.max(0, workWindowHours - activeHoursCount);
         const ranking = agentRanking.find((item) => item.agent === agentName);
         return {
           agent: agentName,
