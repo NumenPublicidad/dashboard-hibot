@@ -231,6 +231,17 @@ function makeEmptyHourlyRow(hour: number) {
   return { hour: String(hour).padStart(2, "0"), CONTACT: 0, BOT: 0, AGENT: 0, UNKNOWN: 0, total: 0 };
 }
 
+
+function formatDurationForApi(seconds: number) {
+  if (!seconds || seconds <= 0) return "0s";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
+  return `${remainingSeconds}s`;
+}
+
 function calculateWorkWindow(firstHour: string | null, lastHour: string | null) {
   if (!firstHour || !lastHour) return 0;
   const first = Number(firstHour);
@@ -239,12 +250,66 @@ function calculateWorkWindow(firstHour: string | null, lastHour: string | null) 
   return Math.max(0, last - first + 1);
 }
 
+
+type QueryCategory = {
+  category: string;
+  keywords: string[];
+};
+
+const QUERY_CATEGORIES: QueryCategory[] = [
+  { category: "Turnos", keywords: ["turno", "turnos", "sacar turno", "reservar", "cita"] },
+  { category: "Viajes", keywords: ["viaje", "viajes", "pasaje", "micro", "colectivo"] },
+  { category: "Trámites", keywords: ["tramite", "trámite", "certificado", "documentacion", "documentación", "legalizacion", "legalización"] },
+  { category: "Horarios", keywords: ["horario", "hora", "abren", "cierran", "atienden", "atencion", "atención"] },
+  { category: "Ubicación", keywords: ["direccion", "dirección", "ubicacion", "ubicación", "donde", "dónde", "lugar"] },
+  { category: "Reclamos", keywords: ["reclamo", "problema", "queja", "no funciona", "error", "demora"] },
+  { category: "Pagos", keywords: ["pago", "pagar", "cuota", "cobro", "factura", "precio", "costo"] },
+  { category: "Otras consultas", keywords: [] },
+];
+
+function classifyUserQuery(content: string | null | undefined) {
+  const normalized = normalizeText(content);
+  if (!normalized) return "Sin texto";
+
+  const match = QUERY_CATEGORIES.find((rule) => {
+    if (!rule.keywords.length) return false;
+    return rule.keywords.some((keyword) => normalized.includes(keyword));
+  });
+
+  return match?.category ?? "Otras consultas";
+}
+
+function getPeakHour(rows: Array<{ hour: string; CONTACT?: number; total?: number }>) {
+  const peak = rows.reduce<{ hour: string; value: number }>(
+    (current, row) => {
+      const value = row.CONTACT ?? row.total ?? 0;
+
+      return value > current.value
+        ? {
+            hour: row.hour,
+            value,
+          }
+        : current;
+    },
+    {
+      hour: "--",
+      value: 0,
+    },
+  );
+
+  return peak;
+}
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const dateFromRaw = searchParams.get("dateFrom");
     const dateToRaw = searchParams.get("dateTo");
     const selectedAgent = searchParams.get("agent") ?? "all";
+    const selectedOrigin = searchParams.get("origin") ?? "all";
+    const selectedEventType = searchParams.get("eventType") ?? "all";
+    const onlyUnanswered = searchParams.get("onlyUnanswered") === "true";
+    const onlyInactive = searchParams.get("onlyInactive") === "true";
     const dateFrom = parseDateParam(dateFromRaw);
     const dateTo = parseDateParam(dateToRaw, true);
 
@@ -253,6 +318,7 @@ export async function GET(request: Request) {
         ...(dateFrom || dateTo
           ? { createdAtHibot: { ...(dateFrom ? { gte: dateFrom } : {}), ...(dateTo ? { lte: dateTo } : {}) } }
           : {}),
+        ...(selectedOrigin !== "all" ? { from: selectedOrigin } : {}),
       },
       select: {
         id: true,
@@ -290,6 +356,16 @@ export async function GET(request: Request) {
       conversationMetrics = conversationMetrics.filter((conversation) => conversation.agent === selectedAgent);
     }
 
+    if (onlyUnanswered) {
+      conversationMetrics = conversationMetrics.filter(
+        (conversation) => conversation.hasContact && !conversation.hasAgent,
+      );
+    }
+
+    if (onlyInactive) {
+      conversationMetrics = conversationMetrics.filter((conversation) => conversation.inactive);
+    }
+
     const allowedConversationIds = new Set(conversationMetrics.map((conversation) => conversation.id));
     const filteredMessages = selectedAgent === "all"
       ? allMessages
@@ -300,11 +376,41 @@ export async function GET(request: Request) {
         ...(dateFrom || dateTo
           ? { createdAt: { ...(dateFrom ? { gte: dateFrom } : {}), ...(dateTo ? { lte: dateTo } : {}) } }
           : {}),
+        ...(selectedEventType !== "all" ? { eventType: selectedEventType } : {}),
       },
       select: { id: true, eventType: true, raw: true, createdAt: true },
       orderBy: { createdAt: "desc" },
       take: 5000,
     });
+
+    const acks = await prisma.hibotAck.findMany({
+      where: {
+        ...(dateFrom || dateTo
+          ? {
+              createdAt: {
+                ...(dateFrom ? { gte: dateFrom } : {}),
+                ...(dateTo ? { lte: dateTo } : {}),
+              },
+            }
+          : {}),
+      },
+      select: {
+        id: true,
+        messageId: true,
+        status: true,
+        createdAt: true,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take: 5000,
+    });
+
+    const ackByStatus = acks.reduce<Record<string, number>>((acc, ack) => {
+      const status = ack.status ?? "UNKNOWN";
+      acc[status] = (acc[status] ?? 0) + 1;
+      return acc;
+    }, {});
 
     const eventsByType = events.reduce<Record<string, number>>((acc, event) => {
       const type = event.eventType ?? "UNKNOWN";
@@ -502,8 +608,158 @@ export async function GET(request: Request) {
 
     const lastEvents: LastEvent[] = events.slice(0, 15).map((event) => ({ id: event.id, eventType: event.eventType ?? "UNKNOWN", createdAt: event.createdAt, summary: summarizeEventRaw(event.raw) }));
 
+    const queryCategoryMap = new Map<
+      string,
+      {
+        category: string;
+        total: number;
+        conversations: Set<string>;
+        withAgent: number;
+        withoutAgent: number;
+        botOnly: number;
+        averageFirstResponseSeconds: number;
+        firstResponseTotalSeconds: number;
+        firstResponseCount: number;
+      }
+    >();
+
+    conversationMetrics.forEach((conversation) => {
+      const firstContact = conversation.messages.find(
+        (message) => normalizeOrigin(message.from) === "CONTACT" && message.content,
+      );
+      const category = classifyUserQuery(firstContact?.content);
+      const current =
+        queryCategoryMap.get(category) ??
+        {
+          category,
+          total: 0,
+          conversations: new Set<string>(),
+          withAgent: 0,
+          withoutAgent: 0,
+          botOnly: 0,
+          averageFirstResponseSeconds: 0,
+          firstResponseTotalSeconds: 0,
+          firstResponseCount: 0,
+        };
+
+      current.total += conversation.messages.filter(
+        (message) => normalizeOrigin(message.from) === "CONTACT",
+      ).length;
+      current.conversations.add(conversation.id);
+      if (conversation.hasAgent) current.withAgent += 1;
+      if (conversation.hasContact && !conversation.hasAgent) current.withoutAgent += 1;
+      if (conversation.hasBot && !conversation.hasAgent) current.botOnly += 1;
+      if (typeof conversation.firstResponseSeconds === "number") {
+        current.firstResponseTotalSeconds += conversation.firstResponseSeconds;
+        current.firstResponseCount += 1;
+      }
+
+      queryCategoryMap.set(category, current);
+    });
+
+    const queryCategories = Array.from(queryCategoryMap.values())
+      .map((item) => ({
+        category: item.category,
+        total: item.total,
+        conversations: item.conversations.size,
+        withAgent: item.withAgent,
+        withoutAgent: item.withoutAgent,
+        botOnly: item.botOnly,
+        averageFirstResponseSeconds:
+          item.firstResponseCount > 0
+            ? Math.round(item.firstResponseTotalSeconds / item.firstResponseCount)
+            : 0,
+      }))
+      .sort((a, b) => b.conversations - a.conversations || b.total - a.total);
+
+    const peakHour = getPeakHour(messagesByHour);
+    const busiestAgent = agentActivitySummary[0] ?? null;
+    const slowestAgent = slowestAgents.find((agent) => agent.averageFirstResponseSeconds > 0) ?? null;
+    const agentWithMostInactiveHours = [...agentActivitySummary].sort(
+      (a, b) => b.inactiveHoursCount - a.inactiveHoursCount,
+    )[0] ?? null;
+
+    const alerts = [
+      ...(notAnsweredByAgent > 0
+        ? [
+            {
+              level: "warning",
+              title: "Conversaciones sin respuesta humana",
+              value: notAnsweredByAgent,
+              description: "Usuarios escribieron y todavía no detectamos mensaje AGENT.",
+            },
+          ]
+        : []),
+      ...(slowestAgent
+        ? [
+            {
+              level: "danger",
+              title: "Mayor demora promedio",
+              value: formatDurationForApi(slowestAgent.averageFirstResponseSeconds),
+              description: `${slowestAgent.agent} tiene el mayor tiempo promedio usuario → agente.`,
+            },
+          ]
+        : []),
+      ...(agentWithMostInactiveHours && agentWithMostInactiveHours.inactiveHoursCount > 0
+        ? [
+            {
+              level: "warning",
+              title: "Mayor tiempo sin actividad estimada",
+              value: `${agentWithMostInactiveHours.inactiveHoursCount}h`,
+              description: `${agentWithMostInactiveHours.agent} dentro de su rango inicio-fin.`,
+            },
+          ]
+        : []),
+      ...(acks.length > 0 && Object.keys(ackByStatus).some((status) => normalizeText(status).includes("error") || normalizeText(status).includes("fail"))
+        ? [
+            {
+              level: "danger",
+              title: "ACKs con posible error",
+              value: Object.entries(ackByStatus)
+                .filter(([status]) => normalizeText(status).includes("error") || normalizeText(status).includes("fail"))
+                .reduce((acc, [, count]) => acc + count, 0),
+              description: "Hay estados de mensajes que podrían indicar fallas de envío.",
+            },
+          ]
+        : []),
+    ];
+
+    const executiveSummary = {
+      text: `Se recibieron ${totalMessages} mensajes en ${totalConversations} conversaciones. ${conversationsWithAgent} tuvieron intervención humana y ${notAnsweredByAgent} siguen sin respuesta humana. La mayor demanda fue a las ${peakHour.hour}:00 con ${peakHour.value} mensajes de usuarios.`,
+      peakHour,
+      busiestAgent: busiestAgent
+        ? {
+            agent: busiestAgent.agent,
+            messages: busiestAgent.messages,
+            activeHours: busiestAgent.activeHoursCount,
+          }
+        : null,
+      slowestAgent: slowestAgent
+        ? {
+            agent: slowestAgent.agent,
+            averageFirstResponseSeconds: slowestAgent.averageFirstResponseSeconds,
+          }
+        : null,
+      agentWithMostInactiveHours: agentWithMostInactiveHours
+        ? {
+            agent: agentWithMostInactiveHours.agent,
+            inactiveHoursCount: agentWithMostInactiveHours.inactiveHoursCount,
+          }
+        : null,
+    };
+
     return NextResponse.json({
-      filters: { dateFrom: dateFromRaw, dateTo: dateToRaw, agent: selectedAgent },
+      filters: {
+        dateFrom: dateFromRaw,
+        dateTo: dateToRaw,
+        agent: selectedAgent,
+        origin: selectedOrigin,
+        eventType: selectedEventType,
+        onlyUnanswered,
+        onlyInactive,
+      },
+      executiveSummary,
+      alerts,
       agents,
       kpis: {
         totalConversations,
@@ -524,8 +780,20 @@ export async function GET(request: Request) {
         totalInactiveAgentHours,
         totalWorkWindowHours,
       },
-      webhookMonitor: { totalEvents: events.length, eventsByType, lastEvents },
-      rankings: { agents: agentRanking, slowestAgents, conversationsWithoutHumanResponse },
+      webhookMonitor: {
+        totalEvents: events.length,
+        eventsByType,
+        lastEvents,
+        totalAcks: acks.length,
+        ackByStatus,
+        lastAcks: acks.slice(0, 15),
+      },
+      rankings: {
+        agents: agentRanking,
+        slowestAgents,
+        conversationsWithoutHumanResponse,
+        queryCategories,
+      },
       charts: { attentionsByAgent, messagesByHour, messagesByDay, messageOrigins, attentionsByHourByAgent },
       agentActivitySummary,
       lastMessages,

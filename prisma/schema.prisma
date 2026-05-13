@@ -151,3 +151,16 @@ model HibotMessage {
   @@index([createdAtHibot])
   @@index([status])
 }
+model HibotAck {
+  id        String   @id @default(cuid())
+
+  messageId String?
+  status    String?
+
+  raw       Json
+  createdAt DateTime @default(now())
+
+  @@index([messageId])
+  @@index([status])
+  @@index([createdAt])
+}

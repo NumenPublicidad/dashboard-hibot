@@ -21,6 +21,16 @@ type HibotMessagePayload = {
   errorDescription?: string;
 };
 
+type HibotAckPayload = Record<string, unknown> & {
+  id?: string;
+  messageId?: string;
+  message_id?: string;
+  msgId?: string;
+  status?: string;
+  state?: string;
+  type?: string;
+};
+
 type HibotConversationPayload = {
   id?: string;
   active?: boolean | string;
@@ -66,7 +76,7 @@ type HibotWebhookPayload = {
   type?: "ASSIGNED" | "FINISHED" | string;
   messages?: HibotMessagePayload[];
   conversations?: HibotConversationPayload[];
-  acks?: unknown[];
+  acks?: HibotAckPayload[];
 };
 
 function parseDate(value: unknown): Date | null {
@@ -103,9 +113,7 @@ function getPayloadEventType(payload: HibotWebhookPayload) {
 
 function getRequestSecret(request: Request) {
   const url = new URL(request.url);
-
   const authorizationHeader = request.headers.get("authorization");
-
   const authorizationToken = authorizationHeader?.startsWith("Bearer ")
     ? authorizationHeader.replace("Bearer ", "").trim()
     : authorizationHeader?.trim() ?? null;
@@ -130,6 +138,16 @@ function getUnauthorizedResponse() {
       status: 401,
     },
   );
+}
+
+function getAckMessageId(ack: HibotAckPayload) {
+  const candidate = ack.messageId ?? ack.message_id ?? ack.msgId ?? ack.id;
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
+}
+
+function getAckStatus(ack: HibotAckPayload) {
+  const candidate = ack.status ?? ack.state ?? ack.type;
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
 }
 
 export async function POST(request: Request) {
@@ -158,47 +176,33 @@ export async function POST(request: Request) {
       const conversationData = {
         active: parseBoolean(conversation.active),
         type: payload.type ?? conversation.type ?? null,
-
         createdAtHibot: parseDate(conversation.created),
         assignedAtHibot: parseDate(conversation.assigned),
         closedAtHibot: parseDate(conversation.closed),
-
         typing: conversation.typing ?? null,
         notes: conversation.notes ?? null,
-
         agentId: conversation.agent?.id ?? null,
         agentName: conversation.agent?.name ?? null,
         agentEmail: conversation.agent?.email ?? null,
-
         clientId: conversation.client?.id ?? null,
         clientName: conversation.client?.name ?? null,
-
         projectId: conversation.project?.id ?? null,
         projectName: conversation.project?.name ?? null,
-
         campaignId: conversation.campaign?.id ?? null,
         campaignName: conversation.campaign?.name ?? null,
-
         channelId: conversation.channel?.id ?? null,
         channelName: conversation.channel?.name ?? null,
         channelType: conversation.channel?.type ?? null,
         channelAccount: conversation.channel?.account ?? null,
-
         asa: conversation.asa ?? null,
         creationAsa: conversation.creationAsa ?? null,
-
         raw: toPrismaJson(conversation),
       };
 
       await prisma.hibotConversation.upsert({
-        where: {
-          id: conversation.id,
-        },
+        where: { id: conversation.id },
         update: conversationData,
-        create: {
-          id: conversation.id,
-          ...conversationData,
-        },
+        create: { id: conversation.id, ...conversationData },
       });
 
       const conversationMessages = conversation.messages ?? [];
@@ -221,9 +225,7 @@ export async function POST(request: Request) {
         };
 
         await prisma.hibotMessage.upsert({
-          where: {
-            id: message.id,
-          },
+          where: { id: message.id },
           update: messageData,
           create: {
             id: message.id,
@@ -240,9 +242,7 @@ export async function POST(request: Request) {
       if (!message.id || !message.conversationId) continue;
 
       await prisma.hibotConversation.upsert({
-        where: {
-          id: message.conversationId,
-        },
+        where: { id: message.conversationId },
         update: {},
         create: {
           id: message.conversationId,
@@ -268,9 +268,7 @@ export async function POST(request: Request) {
       };
 
       await prisma.hibotMessage.upsert({
-        where: {
-          id: message.id,
-        },
+        where: { id: message.id },
         update: messageData,
         create: {
           id: message.id,
@@ -280,11 +278,24 @@ export async function POST(request: Request) {
       });
     }
 
+    const acks = payload.acks ?? [];
+
+    for (const ack of acks) {
+      await prisma.hibotAck.create({
+        data: {
+          messageId: getAckMessageId(ack),
+          status: getAckStatus(ack),
+          raw: toPrismaJson(ack),
+        },
+      });
+    }
+
     return NextResponse.json({
       ok: true,
       eventType: getPayloadEventType(payload),
       conversations: conversations.length,
       messages: looseMessages.length,
+      acks: acks.length,
     });
   } catch (error) {
     console.error("[HIBOT_WEBHOOK_ERROR]", error);

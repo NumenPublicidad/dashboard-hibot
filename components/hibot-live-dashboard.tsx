@@ -179,23 +179,58 @@ type ConversationWithoutHumanResponse = {
   messages: number;
 };
 
+type QueryCategory = {
+  category: string;
+  total: number;
+  conversations: number;
+  withAgent: number;
+  withoutAgent: number;
+  botOnly: number;
+  averageFirstResponseSeconds: number;
+};
+
+type AlertItem = {
+  level: "info" | "warning" | "danger" | string;
+  title: string;
+  value: string | number;
+  description: string;
+};
+
+type ExecutiveSummary = {
+  text: string;
+  peakHour: { hour: string; value: number };
+  busiestAgent: { agent: string; messages: number; activeHours: number } | null;
+  slowestAgent: { agent: string; averageFirstResponseSeconds: number } | null;
+  agentWithMostInactiveHours: { agent: string; inactiveHoursCount: number } | null;
+};
+
 type MetricsResponse = {
   filters: {
     dateFrom: string | null;
     dateTo: string | null;
     agent: string;
+    origin?: string;
+    eventType?: string;
+    onlyUnanswered?: boolean;
+    onlyInactive?: boolean;
   };
+  executiveSummary: ExecutiveSummary;
+  alerts: AlertItem[];
   agents: string[];
   kpis: HibotKpis;
   webhookMonitor: {
     totalEvents: number;
     eventsByType: Record<string, number>;
     lastEvents: LastEvent[];
+    totalAcks?: number;
+    ackByStatus?: Record<string, number>;
+    lastAcks?: Array<{ id: string; messageId: string | null; status: string | null; createdAt: string }>;
   };
   rankings: {
     agents: AgentRankingItem[];
     slowestAgents: AgentRankingItem[];
     conversationsWithoutHumanResponse: ConversationWithoutHumanResponse[];
+    queryCategories: QueryCategory[];
   };
   charts: {
     attentionsByAgent: AttentionByAgent[];
@@ -244,6 +279,10 @@ const buildQuery = (params: {
   dateFrom: string;
   dateTo: string;
   selectedAgent: string;
+  selectedOrigin: string;
+  selectedEventType: string;
+  onlyUnanswered: boolean;
+  onlyInactive: boolean;
 }) => {
   const searchParams = new URLSearchParams();
 
@@ -251,6 +290,18 @@ const buildQuery = (params: {
   if (params.dateTo) searchParams.set("dateTo", params.dateTo);
   if (params.selectedAgent !== "all") {
     searchParams.set("agent", params.selectedAgent);
+  }
+  if (params.selectedOrigin !== "all") {
+    searchParams.set("origin", params.selectedOrigin);
+  }
+  if (params.selectedEventType !== "all") {
+    searchParams.set("eventType", params.selectedEventType);
+  }
+  if (params.onlyUnanswered) {
+    searchParams.set("onlyUnanswered", "true");
+  }
+  if (params.onlyInactive) {
+    searchParams.set("onlyInactive", "true");
   }
 
   const query = searchParams.toString();
@@ -345,6 +396,10 @@ export function HibotLiveDashboard() {
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [selectedAgent, setSelectedAgent] = useState("all");
+  const [selectedOrigin, setSelectedOrigin] = useState("all");
+  const [selectedEventType, setSelectedEventType] = useState("all");
+  const [onlyUnanswered, setOnlyUnanswered] = useState(false);
+  const [onlyInactive, setOnlyInactive] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -360,7 +415,15 @@ export function HibotLiveDashboard() {
         setError(null);
 
         const response = await fetch(
-          buildQuery({ dateFrom, dateTo, selectedAgent }),
+          buildQuery({
+            dateFrom,
+            dateTo,
+            selectedAgent,
+            selectedOrigin,
+            selectedEventType,
+            onlyUnanswered,
+            onlyInactive,
+          }),
           { cache: "no-store" },
         );
 
@@ -379,7 +442,7 @@ export function HibotLiveDashboard() {
         setRefreshing(false);
       }
     },
-    [dateFrom, dateTo, selectedAgent],
+    [dateFrom, dateTo, selectedAgent, selectedOrigin, selectedEventType, onlyUnanswered, onlyInactive],
   );
 
   useEffect(() => {
@@ -474,6 +537,29 @@ export function HibotLiveDashboard() {
               ))}
             </select>
 
+            <select
+              value={selectedOrigin}
+              onChange={(event) => setSelectedOrigin(event.target.value)}
+              className={STYLES.input}
+            >
+              <option value="all">Todos los orígenes</option>
+              <option value="CONTACT">Usuarios</option>
+              <option value="BOT">Bot</option>
+              <option value="AGENT">Agentes</option>
+            </select>
+
+            <select
+              value={selectedEventType}
+              onChange={(event) => setSelectedEventType(event.target.value)}
+              className={STYLES.input}
+            >
+              <option value="all">Todos los eventos</option>
+              <option value="MESSAGES">Mensajes</option>
+              <option value="ACKS">ACKs</option>
+              <option value="ASSIGNED">Asignadas</option>
+              <option value="FINISHED">Finalizadas</option>
+            </select>
+
             <input
               type="date"
               value={dateFrom}
@@ -488,7 +574,37 @@ export function HibotLiveDashboard() {
               className={STYLES.input}
             />
 
-            {(dateFrom || dateTo || selectedAgent !== "all") && (
+            <label className="flex h-9 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3">
+              <input
+                type="checkbox"
+                checked={onlyUnanswered}
+                onChange={(event) => setOnlyUnanswered(event.target.checked)}
+                className="accent-amber-500"
+              />
+              <span className="text-[10px] font-bold uppercase text-zinc-500">
+                Sin respuesta
+              </span>
+            </label>
+
+            <label className="flex h-9 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-3">
+              <input
+                type="checkbox"
+                checked={onlyInactive}
+                onChange={(event) => setOnlyInactive(event.target.checked)}
+                className="accent-red-500"
+              />
+              <span className="text-[10px] font-bold uppercase text-zinc-500">
+                Inactividad
+              </span>
+            </label>
+
+            {(dateFrom ||
+              dateTo ||
+              selectedAgent !== "all" ||
+              selectedOrigin !== "all" ||
+              selectedEventType !== "all" ||
+              onlyUnanswered ||
+              onlyInactive) && (
               <Button
                 type="button"
                 variant="outline"
@@ -496,6 +612,10 @@ export function HibotLiveDashboard() {
                   setDateFrom("");
                   setDateTo("");
                   setSelectedAgent("all");
+                  setSelectedOrigin("all");
+                  setSelectedEventType("all");
+                  setOnlyUnanswered(false);
+                  setOnlyInactive(false);
                 }}
                 className="h-9 rounded-lg border-zinc-700 bg-zinc-950 px-3 text-xs font-bold uppercase tracking-wide text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
               >
@@ -539,6 +659,102 @@ export function HibotLiveDashboard() {
           </div>
         )}
       </Card>
+
+      <Card className={`${STYLES.card} border-zinc-800/70`}>
+        <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+          <div>
+            <p className="text-xs font-black uppercase tracking-[0.15em] text-zinc-400">
+              Exportar reportes
+            </p>
+            <p className="mt-1 text-xs text-zinc-500">
+              CSV para compartir: mensajes, agentes o conversaciones sin respuesta.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button asChild variant="outline" className="h-9 border-zinc-700 bg-zinc-950 text-xs text-zinc-300 hover:bg-zinc-800">
+              <a href={`/api/hibot/export?type=agents${dateFrom ? `&dateFrom=${dateFrom}` : ""}${dateTo ? `&dateTo=${dateTo}` : ""}`}>Agentes CSV</a>
+            </Button>
+            <Button asChild variant="outline" className="h-9 border-zinc-700 bg-zinc-950 text-xs text-zinc-300 hover:bg-zinc-800">
+              <a href={`/api/hibot/export?type=unanswered${dateFrom ? `&dateFrom=${dateFrom}` : ""}${dateTo ? `&dateTo=${dateTo}` : ""}`}>Sin respuesta CSV</a>
+            </Button>
+            <Button asChild variant="outline" className="h-9 border-zinc-700 bg-zinc-950 text-xs text-zinc-300 hover:bg-zinc-800">
+              <a href={`/api/hibot/export?type=messages${dateFrom ? `&dateFrom=${dateFrom}` : ""}${dateTo ? `&dateTo=${dateTo}` : ""}`}>Mensajes CSV</a>
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {data?.executiveSummary && (
+        <Card className={`${STYLES.card} border-sky-500/20`}>
+          <CardContent className="p-5">
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-sky-400">
+              Resumen ejecutivo
+            </p>
+            <p className="mt-2 text-sm leading-6 text-zinc-300">
+              {data.executiveSummary.text}
+            </p>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                <p className="text-[10px] uppercase text-zinc-500">Pico de demanda</p>
+                <p className="mt-1 text-lg font-black text-sky-400">
+                  {data.executiveSummary.peakHour.hour}:00 · {data.executiveSummary.peakHour.value} msgs
+                </p>
+              </div>
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                <p className="text-[10px] uppercase text-zinc-500">Agente con más actividad</p>
+                <p className="mt-1 text-lg font-black text-emerald-400">
+                  {data.executiveSummary.busiestAgent
+                    ? `${data.executiveSummary.busiestAgent.agent} · ${data.executiveSummary.busiestAgent.messages} msgs`
+                    : "Sin datos"}
+                </p>
+              </div>
+              <div className="rounded-lg border border-zinc-800 bg-zinc-950 p-3">
+                <p className="text-[10px] uppercase text-zinc-500">Mayor hora sin actividad</p>
+                <p className="mt-1 text-lg font-black text-amber-400">
+                  {data.executiveSummary.agentWithMostInactiveHours
+                    ? `${data.executiveSummary.agentWithMostInactiveHours.agent} · ${data.executiveSummary.agentWithMostInactiveHours.inactiveHoursCount}h`
+                    : "Sin datos"}
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {data?.alerts?.length ? (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          {data.alerts.map((alert) => (
+            <Card
+              key={`${alert.title}-${alert.value}`}
+              className={`${STYLES.card} ${
+                alert.level === "danger"
+                  ? "border-red-500/30"
+                  : alert.level === "warning"
+                    ? "border-amber-500/30"
+                    : "border-sky-500/30"
+              }`}
+            >
+              <CardContent className="p-4">
+                <p className="text-[10px] font-black uppercase tracking-[0.15em] text-zinc-500">
+                  {alert.title}
+                </p>
+                <p
+                  className={`mt-2 text-2xl font-black ${
+                    alert.level === "danger"
+                      ? "text-red-400"
+                      : alert.level === "warning"
+                        ? "text-amber-400"
+                        : "text-sky-400"
+                  }`}
+                >
+                  {alert.value}
+                </p>
+                <p className="mt-1 text-xs text-zinc-500">{alert.description}</p>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : null}
 
       {kpis && (
         <>
@@ -604,6 +820,41 @@ export function HibotLiveDashboard() {
           <Table><TableHeader><TableRow className={STYLES.tableHeader}><TableHead>Agente</TableHead><TableHead>Inicio</TableHead><TableHead>Fin</TableHead><TableHead className="text-right">Rango</TableHead><TableHead className="text-right">Activas</TableHead><TableHead className="text-right">Sin act.</TableHead><TableHead className="text-right">Msg.</TableHead></TableRow></TableHeader><TableBody>{data?.agentActivitySummary.length ? (data.agentActivitySummary.slice(0, 12).map((item) => (<TableRow key={item.agent} className={STYLES.tableRow}><TableCell className="text-xs font-bold text-zinc-200">{item.agent}</TableCell><TableCell className="font-mono text-[10px] text-zinc-500">{item.firstHour ? `${item.firstHour}:00` : "--"}</TableCell><TableCell className="font-mono text-[10px] text-zinc-500">{item.lastHour ? `${item.lastHour}:00` : "--"}</TableCell><TableCell className="text-right font-black text-zinc-300">{item.workWindowHours}h</TableCell><TableCell className="text-right font-black text-emerald-400">{item.activeHoursCount}h</TableCell><TableCell className="text-right font-black text-amber-400">{item.inactiveHoursCount}h</TableCell><TableCell className="text-right font-black text-sky-400">{item.messages}</TableCell></TableRow>))) : (<EmptyRow colSpan={7} label="Todavía no hay horarios de agentes." />)}</TableBody></Table>
         </Card>
       </div>
+
+      <Card className={STYLES.card}>
+        <CardHeader className="border-b border-zinc-800/50">
+          <CardTitle className="text-sm font-bold">Principales consultas de usuarios</CardTitle>
+          <p className="text-xs text-zinc-500">
+            Clasificación inicial por palabras clave. Sirve para ver temas frecuentes, derivación a agente y consultas sin respuesta.
+          </p>
+        </CardHeader>
+        <Table>
+          <TableHeader>
+            <TableRow className={STYLES.tableHeader}>
+              <TableHead>Consulta</TableHead>
+              <TableHead className="text-center">Conv.</TableHead>
+              <TableHead className="text-center">Con agente</TableHead>
+              <TableHead className="text-center">Sin respuesta</TableHead>
+              <TableHead className="text-right">Resp. prom.</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {data?.rankings.queryCategories?.length ? (
+              data.rankings.queryCategories.slice(0, 10).map((category) => (
+                <TableRow key={category.category} className={STYLES.tableRow}>
+                  <TableCell className="font-bold text-zinc-200">{category.category}</TableCell>
+                  <TableCell className="text-center font-mono text-xs text-zinc-400">{category.conversations}</TableCell>
+                  <TableCell className="text-center font-mono text-xs text-emerald-400">{category.withAgent}</TableCell>
+                  <TableCell className="text-center font-mono text-xs text-amber-400">{category.withoutAgent}</TableCell>
+                  <TableCell className="text-right text-xs font-black text-sky-400">{formatSeconds(category.averageFirstResponseSeconds)}</TableCell>
+                </TableRow>
+              ))
+            ) : (
+              <EmptyRow colSpan={5} label="Todavía no hay consultas clasificadas." />
+            )}
+          </TableBody>
+        </Table>
+      </Card>
 
       <div className="grid gap-6 xl:grid-cols-2">
         <Card className={STYLES.card}>
