@@ -92,17 +92,23 @@ const QUERY_CATEGORIES: QueryCategory[] = [
       "turno",
       "turnos",
       "sacar turno",
+      "solicitar turno",
       "reservar",
       "cita",
       "renovar registro",
+      "renovar licencia",
       "licencia",
       "registro",
       "cancelar mi turno",
+      "cancelar turno",
       "primera vez",
       "original",
     ],
   },
-  { category: "Viajes", keywords: ["viaje", "viajes", "pasaje", "micro", "colectivo"] },
+  {
+    category: "Viajes",
+    keywords: ["viaje", "viajes", "pasaje", "micro", "colectivo"],
+  },
   {
     category: "Trámites",
     keywords: [
@@ -143,15 +149,30 @@ const QUERY_CATEGORIES: QueryCategory[] = [
       "polvorines",
     ],
   },
-  { category: "Reclamos", keywords: ["reclamo", "problema", "queja", "no funciona", "error", "demora"] },
-  { category: "Pagos", keywords: ["pago", "pagar", "cuota", "cobro", "factura", "precio", "costo"] },
-  { category: "Otras consultas", keywords: [] },
+  {
+    category: "Reclamos",
+    keywords: ["reclamo", "problema", "queja", "no funciona", "error", "demora"],
+  },
+  {
+    category: "Pagos",
+    keywords: ["pago", "pagar", "cuota", "cobro", "factura", "precio", "costo"],
+  },
+  {
+    category: "Otras consultas",
+    keywords: [],
+  },
 ];
 
 function parseDateParam(value: string | null, endOfDay = false) {
   if (!value) return null;
 
-  const date = new Date(`${value}T${endOfDay ? "23:59:59" : "00:00:00"}`);
+  const [year, month, day] = value.split("-").map(Number);
+
+  if (!year || !month || !day) return null;
+
+  const date = endOfDay
+    ? new Date(year, month - 1, day, 23, 59, 59, 999)
+    : new Date(year, month - 1, day, 0, 0, 0, 0);
 
   return Number.isNaN(date.getTime()) ? null : date;
 }
@@ -187,14 +208,6 @@ function cleanAgentName(value: string | null | undefined) {
   if (!text || text === "-") return null;
 
   return text;
-}
-
-function getMessageAgentName(message: MessageRow) {
-  return (
-    cleanAgentName(message.conversation.agentName) ??
-    cleanAgentName(message.sender) ??
-    "Agente sin nombre"
-  );
 }
 
 function getConversationAgent(messages: MessageRow[]) {
@@ -838,7 +851,10 @@ export async function GET(request: Request) {
       messagesByDayMap.set(day, dayRow);
 
       if (origin === "AGENT") {
-        const agentName = getMessageAgentName(message);
+        const agentName =
+          cleanAgentName(message.conversation.agentName) ??
+          cleanAgentName(message.sender) ??
+          "Agente sin nombre";
 
         const hourMap = agentHourlyMap.get(hour) ?? new Map<string, number>();
 
@@ -970,6 +986,8 @@ export async function GET(request: Request) {
       string,
       {
         agent: string;
+        firstAt: Date | null;
+        lastAt: Date | null;
         firstHour: string | null;
         lastHour: string | null;
         activeHoursCount: number;
@@ -987,6 +1005,8 @@ export async function GET(request: Request) {
         agentSummaryMap.get(daily.agent) ??
         {
           agent: daily.agent,
+          firstAt: null,
+          lastAt: null,
           firstHour: null,
           lastHour: null,
           activeHoursCount: 0,
@@ -1004,25 +1024,39 @@ export async function GET(request: Request) {
       current.messages += daily.messages;
       current.activeDaysCount += 1;
 
-      if (daily.firstHour) {
-        current.firstHour =
-          current.firstHour === null || Number(daily.firstHour) < Number(current.firstHour)
-            ? daily.firstHour
-            : current.firstHour;
-      }
+      const dailyMessages = filteredMessages.filter((message) => {
+        if (!message.createdAtHibot) return false;
+        if (normalizeOrigin(message.from) !== "AGENT") return false;
 
-      if (daily.lastHour) {
-        current.lastHour =
-          current.lastHour === null || Number(daily.lastHour) > Number(current.lastHour)
-            ? daily.lastHour
-            : current.lastHour;
-      }
+        const agentName =
+          cleanAgentName(message.conversation.agentName) ??
+          cleanAgentName(message.sender) ??
+          "Agente sin nombre";
+
+        return agentName === daily.agent && formatDay(message.createdAtHibot) === daily.day;
+      });
+
+      const dailyFirstDate = dailyMessages[0]?.createdAtHibot ?? null;
+      const dailyLastDate = dailyMessages[dailyMessages.length - 1]?.createdAtHibot ?? null;
+
+      current.firstAt =
+        dailyFirstDate && (!current.firstAt || dailyFirstDate < current.firstAt)
+          ? dailyFirstDate
+          : current.firstAt;
+
+      current.lastAt =
+        dailyLastDate && (!current.lastAt || dailyLastDate > current.lastAt)
+          ? dailyLastDate
+          : current.lastAt;
 
       const ranking = agentRanking.find((item) => item.agent === daily.agent);
 
       current.conversations = ranking?.conversations ?? current.conversations;
       current.averageFirstResponseSeconds =
         ranking?.averageFirstResponseSeconds ?? current.averageFirstResponseSeconds;
+
+      current.firstHour = current.firstAt ? getHourLabel(current.firstAt) : null;
+      current.lastHour = current.lastAt ? getHourLabel(current.lastAt) : null;
 
       agentSummaryMap.set(daily.agent, current);
     });
@@ -1103,11 +1137,12 @@ export async function GET(request: Request) {
     >();
 
     conversationMetrics.forEach((conversation) => {
-      const firstContact = conversation.messages.find((message) => {
-        return normalizeOrigin(message.from) === "CONTACT" && message.content;
-      });
+      const contactText = conversation.messages
+        .filter((message) => normalizeOrigin(message.from) === "CONTACT")
+        .map((message) => message.content ?? "")
+        .join(" ");
 
-      const category = classifyUserQuery(firstContact?.content);
+      const category = classifyUserQuery(contactText);
 
       const current =
         queryCategoryMap.get(category) ??
